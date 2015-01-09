@@ -7,6 +7,7 @@ module Data.Torrent
     , fromFile
     , getInfoHash
     , toHex
+    , totalLength
     ) where
 
 import qualified Crypto.Hash.SHA1 as SHA1
@@ -15,6 +16,7 @@ import qualified Data.ByteString as BS
 import qualified Data.ByteString.Char8 as C
 import Data.Typeable
 import Text.Printf
+import Data.List(foldl')
 
 data Torrent = Torrent
     { tAnnounce :: BS.ByteString
@@ -75,3 +77,11 @@ getInfoHash = SHA1.hashlazy . BE.encode . tInfoDict
 
 toHex :: BS.ByteString -> String
 toHex bytes = printf "%02x" =<< C.unpack bytes
+
+totalLength :: InfoDict -> Integer
+totalLength InfoDict { idLength = Just len } = len
+totalLength InfoDict { idFiles = Just files } = sum' $ map fiLength files
+totalLength _ = undefined
+
+sum' :: Num a => [a] -> a
+sum' = foldl' (+) 0
