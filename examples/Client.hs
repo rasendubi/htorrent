@@ -35,7 +35,6 @@ main = do
         lprint response
         let (Response _ peers) = response
         lift $ forM_ peers (tryPeer torrent)
-        lputStrLn "Here"
 
 tryPeer :: Torrent -> Peer -> IO ()
 tryPeer torrent peer = do
@@ -45,9 +44,10 @@ tryPeer torrent peer = do
         Left err -> putStrLn $ "Error: " ++ err
         Right conn -> do
             sendHandshake peerId (getInfoHash torrent) conn
-            response <- recv conn 60
+            response <- recv conn 68
             putStr "Got response: "
             putStrLn $ show response
+            print =<< socketToMessages conn
 
 lprint :: (Show a) => a -> EitherT String IO ()
 lprint = lift . print
