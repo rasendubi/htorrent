@@ -7,6 +7,7 @@ module Network.BitTorrent.Peer
 , Message(..)
 , toMessages
 , socketToMessages
+, sendMessage
 )
 where
 
@@ -18,9 +19,10 @@ import Data.ByteString(ByteString)
 import qualified Data.ByteString.Char8 as BS
 import qualified Data.ByteString.Lazy as BL
 import Network.Socket hiding (send, sendTo, recv, recvFrom, KeepAlive)
-import Network.Socket.ByteString (send)
+import Network.Socket.ByteString.Lazy
 
 import qualified Network.Socket.ByteString.Lazy as SL
+import qualified Network.Socket.ByteString as S
 
 import Control.Exception
 
@@ -49,12 +51,20 @@ instance Binary Handshake where
 
 data Message
     = KeepAlive
+    | Choke
+    | Unchoke
+    | Interested
+    | NotInterested
     | Have Word32
     | Bitfield ByteString
     deriving (Show, Read, Eq)
 
 instance Binary Message where
     put KeepAlive = putWord32be 0
+    put Choke = putWord32be 1 >> putWord8 0
+    put Unchoke = putWord32be 1 >> putWord8 1
+    put Interested = putWord32be 1 >> putWord8 2
+    put NotInterested = putWord32be 1 >> putWord8 3
     put (Have idx) = putWord32be 5 >> putWord8 4 >> putWord32be idx
     put (Bitfield bitfield) = do
         putWord32be . fromIntegral $ 1 + BS.length bitfield
@@ -67,6 +77,18 @@ instance Binary Message where
             else do
                 msgType <- getWord8
                 case msgType of
+                    0 -> do
+                        guard $ len == 1
+                        return Choke
+                    1 -> do
+                        guard $ len == 1
+                        return Unchoke
+                    2 -> do
+                        guard $ len == 1
+                        return Interested
+                    3 -> do
+                        guard $ len == 1
+                        return NotInterested
                     4 -> do
                         guard $ len == 5
                         Have <$> getWord32be
@@ -88,8 +110,8 @@ connectToPeer peer = do
     res <- try (connect sock (addrAddress addr)) :: IO (Either IOException ())
     return $ either (Left . show) (Right . const sock) res
 
-sendHandshake :: ByteString -> ByteString -> Socket -> IO Int
-sendHandshake peerId infoHash sock = send sock $ handshake peerId infoHash
+sendHandshake :: ByteString -> ByteString -> Socket -> IO ()
+sendHandshake peerId infoHash sock = S.sendAll sock $ handshake peerId infoHash
 
 toMessages :: BL.ByteString -> [Either String Message]
 toMessages str
@@ -102,3 +124,6 @@ toMessages str
 
 socketToMessages :: Socket -> IO [Either String Message]
 socketToMessages = fmap toMessages . SL.getContents
+
+sendMessage :: Message -> Socket -> IO ()
+sendMessage msg sock = sendAll sock $ encode msg

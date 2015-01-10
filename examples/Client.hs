@@ -3,6 +3,7 @@ module Main(main) where
 
 import Data.Torrent as T
 import qualified Data.ByteString.Char8 as BS
+import qualified Data.ByteString.Lazy as BL
 import Network.BitTorrent.Tracker
 import Network.BitTorrent.Peer
 import Network.HTTP hiding (Response)
@@ -10,6 +11,8 @@ import Network.Socket.ByteString (recv)
 import Control.Monad
 import System.Exit
 import System.Environment
+import Data.Binary
+import Control.Applicative
 
 import Control.Monad.Trans.Either
 import Control.Monad.Trans
@@ -44,9 +47,10 @@ tryPeer torrent peer = do
         Left err -> putStrLn $ "Error: " ++ err
         Right conn -> do
             sendHandshake peerId (getInfoHash torrent) conn
-            response <- recv conn 68
+            response <- decode . BL.fromStrict <$> recv conn 68 :: IO Handshake
             putStr "Got response: "
-            putStrLn $ show response
+            print response
+            sendMessage Interested conn
             print =<< socketToMessages conn
 
 lprint :: (Show a) => a -> EitherT String IO ()

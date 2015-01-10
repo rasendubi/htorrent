@@ -35,4 +35,5 @@ executable client
                      , mtl
                      , either
                      , network
+                     , binary
   ghc-options:         -Wall -fno-warn-unused-do-bind
