@@ -8,6 +8,7 @@ module Network.BitTorrent.Peer
 , toMessages
 , socketToMessages
 , sendMessage
+, lengthToRequests
 )
 where
 
@@ -57,6 +58,16 @@ data Message
     | NotInterested
     | Have Word32
     | Bitfield ByteString
+    | Request
+        { rIndex :: Word32
+        , rBegin :: Word32
+        , rLength :: Word32
+        }
+    | Piece
+        { pIndex :: Word32
+        , pBegin :: Word32
+        , pBlock :: ByteString
+        }
     deriving (Show, Read, Eq)
 
 instance Binary Message where
@@ -70,6 +81,19 @@ instance Binary Message where
         putWord32be . fromIntegral $ 1 + BS.length bitfield
         putWord8 5
         putByteString bitfield
+    put (Request index begin len) = do
+        putWord32be 13
+        putWord8 6
+        putWord32be index
+        putWord32be begin
+        putWord32be len
+    put (Piece index begin block) = do
+        putWord32be . fromIntegral $ 9 + BS.length block
+        putWord8 7
+        putWord32be index
+        putWord32be begin
+        putByteString block
+
     get = do
         len <- getWord32be
         if len == 0
@@ -93,6 +117,10 @@ instance Binary Message where
                         guard $ len == 5
                         Have <$> getWord32be
                     5 -> Bitfield <$> getByteString (fromIntegral len - 1)
+                    6 -> do
+                        guard $ len == 13
+                        Request <$> getWord32be <*> getWord32be <*> getWord32be
+                    7 -> Piece <$> getWord32be <*> getWord32be <*> getByteString (fromIntegral len - 9)
                     _ -> do
                         rest <- getByteString $ fromIntegral len - 1
                         traceShow rest $ fail "Can't parse message"
@@ -116,7 +144,7 @@ sendHandshake peerId infoHash sock = S.sendAll sock $ handshake peerId infoHash
 toMessages :: BL.ByteString -> [Either String Message]
 toMessages str
     | BL.null str = []
-    | otherwise   = traceShow msg msg : toMessages rest
+    | otherwise   = msg : toMessages rest
     where
         (msg,rest) = case runGetOrFail get str of
             Left (s,_,err)  -> (Left err, s)
@@ -127,3 +155,14 @@ socketToMessages = fmap toMessages . SL.getContents
 
 sendMessage :: Message -> Socket -> IO ()
 sendMessage msg sock = sendAll sock $ encode msg
+
+lengthToRequests :: Integer -> Integer -> [Message]
+lengthToRequests pieceSize size = recurse 0
+    where
+        recurse start
+            | start >= size = []
+            | otherwise     = Request index begin (fromIntegral len) : recurse (start + len)
+            where
+                index = fromIntegral $ start `div` pieceSize
+                begin = fromIntegral $ start `mod` pieceSize
+                len   = min 16384 (size - start)

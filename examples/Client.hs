@@ -6,13 +6,15 @@ import qualified Data.ByteString.Char8 as BS
 import qualified Data.ByteString.Lazy as BL
 import Network.BitTorrent.Tracker
 import Network.BitTorrent.Peer
-import Network.HTTP hiding (Response)
+import Network.HTTP hiding (Response,Request)
 import Network.Socket.ByteString (recv)
+import Network.Socket hiding (recv)
 import Control.Monad
 import System.Exit
 import System.Environment
 import Data.Binary
 import Control.Applicative
+import System.IO
 
 import Control.Monad.Trans.Either
 import Control.Monad.Trans
@@ -25,6 +27,7 @@ main = do
         _ -> return ()
     forM_ args $ \file -> runEitherT $ do
         torrent <- hoistEither =<< lift (T.fromFile file)
+        lputStr "All requests are: "
         lputStr "My handshake is: "
         lprint $ handshake peerId (getInfoHash torrent)
         lputStrLn $ file ++ ": " ++ show torrent
@@ -51,7 +54,20 @@ tryPeer torrent peer = do
             putStr "Got response: "
             print response
             sendMessage Interested conn
-            print =<< socketToMessages conn
+            mapM_ (handleMessage conn torrent) =<< socketToMessages conn
+
+handleMessage :: Socket -> Torrent -> Either String Message -> IO ()
+handleMessage _ _ (Left str) = putStrLn $ "Error: " ++ str
+handleMessage conn torrent (Right msg) = do
+    print msg
+    let requests = lengthToRequests (idPieceLength . tInfoDict $ torrent) (totalLength . tInfoDict $ torrent)
+    let pieceSize = idPieceLength . tInfoDict $ torrent
+    case msg of
+        Unchoke -> forM_ requests $ \m -> sendMessage m conn
+        Piece index begin piece -> withBinaryFile (BS.unpack . idName . tInfoDict $ torrent) ReadWriteMode $ \h -> do
+            hSeek h AbsoluteSeek (fromIntegral index * pieceSize + fromIntegral begin)
+            BS.hPut h piece
+        _ -> return ()
 
 lprint :: (Show a) => a -> EitherT String IO ()
 lprint = lift . print
