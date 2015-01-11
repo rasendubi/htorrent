@@ -1,9 +1,12 @@
 {-# LANGUAGE OverloadedStrings #-}
 module Main(main) where
 
+import Control.Concurrent
+import Control.Concurrent.STM
 import Data.Torrent as T
 import qualified Data.ByteString.Char8 as BS
 import qualified Data.ByteString.Lazy as BL
+import Network.BitTorrent.Client
 import Network.BitTorrent.Tracker
 import Network.BitTorrent.Peer
 import Network.HTTP hiding (Response,Request)
@@ -27,20 +30,15 @@ main = do
         _ -> return ()
     forM_ args $ \file -> runEitherT $ do
         torrent <- hoistEither =<< lift (T.fromFile file)
-        lputStr "All requests are: "
-        lputStr "My handshake is: "
-        lprint $ handshake peerId (getInfoHash torrent)
         lputStrLn $ file ++ ": " ++ show torrent
-        let uri = announceURI torrent peerId
-        lputStrLn $ "\nAnnouncing to " ++ uri
-        rsp <- bimapEitherT show id (hoistEither =<< lift (simpleHTTP $ getRequest uri))
-        lputStrLn "Got responce:"
-        lprint rsp
-        lprint $ rspBody rsp
-        response <- hoistEither $ decodeResponse . BS.pack $ rspBody rsp
-        lprint response
-        let (Response _ peers) = response
-        lift $ forM_ peers (tryPeer torrent)
+        let announce = tAnnounce torrent
+        state <- lift $ pollTracker client torrent announce
+        forever $ do
+            response <- lift $ readTVarIO $ tsTrackerResponse state
+            lprint response
+            lift $ threadDelay 6000000
+        -- let (Response _ peers) = response
+        -- lift $ forM_ peers (tryPeer torrent)
 
 tryPeer :: Torrent -> Peer -> IO ()
 tryPeer torrent peer = do
@@ -81,5 +79,8 @@ lputStrLn = lift . putStrLn
 showUsage :: IO ()
 showUsage = getProgName >>= \name -> putStrLn $ "Usage: " ++ name ++ " <torrent>"
 
+client :: Client
+client = Client "HASKELL7TORRENT5YEAH" []
+
 peerId :: BS.ByteString
-peerId = "HASKELL7TORRENT5YEAH"
+peerId = clientId client

@@ -8,6 +8,7 @@ module Data.Torrent
     , getInfoHash
     , toHex
     , totalLength
+    , numPieces
     ) where
 
 import qualified Crypto.Hash.SHA1 as SHA1
@@ -82,6 +83,12 @@ totalLength :: InfoDict -> Integer
 totalLength InfoDict { idLength = Just len } = len
 totalLength InfoDict { idFiles = Just files } = sum' $ map fiLength files
 totalLength _ = undefined
+
+numPieces :: Num a => Torrent -> a
+numPieces t = fromIntegral $ totalLen + pieceLen - 1 `div` pieceLen
+    where
+        totalLen = totalLength $ tInfoDict t
+        pieceLen = idPieceLength $ tInfoDict t
 
 sum' :: Num a => [a] -> a
 sum' = foldl' (+) 0
