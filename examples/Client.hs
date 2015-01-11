@@ -32,11 +32,19 @@ main = do
     forM_ args $ \file -> runEitherT $ do
         torrent <- hoistEither =<< lift (T.fromFile file)
         lputStrLn $ file ++ ": " ++ show torrent
-        let announce = tAnnounce torrent
-        state <- lift $ pollTracker client torrent announce
-        lift $ trackChanges print (tsTrackerResponse state)
+        download <- lift $ startDownload client torrent
+        -- lprint download
+        -- let announce = tAnnounce torrent
+        -- state <- lift $ pollTracker client torrent announce
+        -- lift $ trackChanges onTrackerResponseChanged (tsTrackerResponse state)
         -- let (Response _ peers) = response
         -- lift $ forM_ peers (tryPeer torrent)
+        return ()
+    forever yield
+
+onTrackerResponseChanged resp = do
+    putStr "Tracker changed: "
+    print resp
     
 trackChanges :: (Eq a) => (a -> IO b) -> TVar a -> IO ()
 trackChanges action var = do
@@ -94,7 +102,7 @@ showUsage :: IO ()
 showUsage = getProgName >>= \name -> putStrLn $ "Usage: " ++ name ++ " <torrent>"
 
 client :: Client
-client = Client "HASKELL7TORRENT5YEAH" []
+client = Client "HASKELL7TORRENT5YEAH"
 
 peerId :: BS.ByteString
 peerId = clientId client

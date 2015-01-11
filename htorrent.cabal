@@ -23,6 +23,7 @@ library
                      , network
                      , stm
                      , stm-delay
+                     , stm-linkedlist
                      , bitarray
                      , timers
                      , suspend

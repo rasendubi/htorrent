@@ -11,7 +11,7 @@ import Control.Monad
 import qualified Data.ByteString.Char8 as BS
 
 import Data.BitArray
-import Data.BitArray.ST
+import Data.STM.LinkedList
 
 import Data.Torrent
 import Network.BitTorrent.Tracker
@@ -21,13 +21,13 @@ import Network.HTTP hiding (Response, Request)
 
 data Client = Client
     { clientId :: BS.ByteString
-    , clientDownloads :: [TVar Download]
+    -- , clientDownload :: TVar Download
     }
 
 data Download = Download
     { dTorrent :: Torrent
-    , dTrackers :: TVar TrackerState
-    , dPeers :: TVar PeerState
+    , dTracker :: TrackerState
+    , dPeers :: LinkedList PeerState
     }
 
 data TrackerState = TrackerState
@@ -48,16 +48,23 @@ updateWait st = do
 
 data PeerState = PeerState
     { psPeer :: Peer
-    , psInterested :: Bool
-    , psChocked :: Bool
-    , psWeInterested :: Bool
-    , psWeUnchocked :: Bool
-    , psPieces :: BitArray
+    , psInterested :: TVar Bool
+    , psUnchocked :: TVar Bool
+    , psWeInterested :: TVar Bool
+    , psWeUnchocked :: TVar Bool
+    , psPieces :: TVar BitArray
     }
 
+bitArrayForTorrent :: Torrent -> BitArray
+bitArrayForTorrent t = bitArray (0, numPieces t) []
 
-newPeerState :: Torrent -> Peer -> PeerState
-newPeerState t peer = PeerState peer False False False False (bitArray (0, numPieces t) [])
+newPeerState :: Torrent -> Peer -> IO PeerState
+newPeerState t peer =
+    PeerState peer <$> newTVarIO False
+                   <*> newTVarIO False
+                   <*> newTVarIO False
+                   <*> newTVarIO False
+                   <*> newTVarIO (bitArrayForTorrent t)
 
 announceToURI :: Client -> Torrent -> BS.ByteString -> IO TrackerResponse
 announceToURI client torrent announce = do
@@ -88,3 +95,24 @@ updateTracker client torrent (TrackerState tracker responseVar delay) = forever 
             Response interval _ -> interval
     d <- newDelay $ fromIntegral delayInterval
     atomically $ writeTVar delay (Just d)
+
+startDownload :: Client -> Torrent -> IO Download
+startDownload client torrent = do
+    download <- Download torrent
+             <$> pollTracker client torrent (tAnnounce torrent)
+             <*> emptyIO
+    forkIO $ downloadBackground client download
+    return download
+
+downloadBackground :: Client -> Download -> IO ()
+downloadBackground client download = do
+    peers <- atomically $ waitForPeers download
+    print peers
+
+waitForPeers :: Download -> STM [Peer]
+waitForPeers download = do
+    let responseVar = tsTrackerResponse $ dTracker download
+    response <- readTVar responseVar
+    case response of
+        Response _ peers | not $ Prelude.null peers -> return peers
+        _ -> retry
