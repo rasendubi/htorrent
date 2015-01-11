@@ -26,6 +26,7 @@ import Control.Monad.Trans
 main :: IO ()
 main = do
     args <- getArgs
+    client <- Client "HASKELL7TORRENT5YEAH" <$> newTVarIO 0
     case args of
         [] -> showUsage >> exitFailure
         _ -> return ()
@@ -74,7 +75,7 @@ tryPeer torrent peer = do
             putStr "Got response: "
             print response
             sendMessage Interested conn
-            mapM_ (handleMessage conn torrent) =<< socketToMessages conn
+            -- mapM_ (handleMessage conn torrent) =<< socketToMessages conn
 
 handleMessage :: Socket -> Torrent -> Either String Message -> IO ()
 handleMessage _ _ (Left str) = putStrLn $ "Error: " ++ str
@@ -101,8 +102,5 @@ lputStrLn = lift . putStrLn
 showUsage :: IO ()
 showUsage = getProgName >>= \name -> putStrLn $ "Usage: " ++ name ++ " <torrent>"
 
-client :: Client
-client = Client "HASKELL7TORRENT5YEAH"
-
 peerId :: BS.ByteString
-peerId = clientId client
+peerId = undefined
