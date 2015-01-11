@@ -18,6 +18,7 @@ import System.Environment
 import Data.Binary
 import Control.Applicative
 import System.IO
+import Data.Function
 
 import Control.Monad.Trans.Either
 import Control.Monad.Trans
@@ -33,12 +34,25 @@ main = do
         lputStrLn $ file ++ ": " ++ show torrent
         let announce = tAnnounce torrent
         state <- lift $ pollTracker client torrent announce
-        forever $ do
-            response <- lift $ readTVarIO $ tsTrackerResponse state
-            lprint response
-            lift $ threadDelay 6000000
+        lift $ trackChanges print (tsTrackerResponse state)
         -- let (Response _ peers) = response
         -- lift $ forM_ peers (tryPeer torrent)
+    
+trackChanges :: (Eq a) => (a -> IO b) -> TVar a -> IO ()
+trackChanges action var = do
+    initial <- readTVarIO var
+    action initial
+    trackFurther action var initial
+
+trackFurther :: (Eq a) => (a -> IO b) -> TVar a -> a -> IO ()
+trackFurther action var prev = do
+    value <- atomically $ do
+        val <- readTVar var
+        if val == prev
+            then retry
+            else return val
+    action value
+    trackFurther action var value
 
 tryPeer :: Torrent -> Peer -> IO ()
 tryPeer torrent peer = do
