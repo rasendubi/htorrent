@@ -1,42 +1,46 @@
 module Network.BitTorrent.Client
-where
+    ( Client(..)
+    , TrackerState(..)
+    , PeerState
+    , PeerStateSnapshot(..)
+    , peerStateToSnapshot
+    , createClient
+    , startDownload
+    ) where
 
 import Prelude hiding (zipWith, or)
 
-import System.IO
-import System.IO.Error
-import Control.Applicative
-import Control.Concurrent
+import Control.Applicative ((<$>), (<*>), pure)
+import Control.Concurrent (forkIO)
 import Control.Concurrent.STM
 import Control.Concurrent.STM.Delay
 import Control.Monad
-import Control.Monad.ST
+import Control.Monad.ST (runST)
+
+import Data.Array.BitArray
+import Data.Array.BitArray.ByteString (fromByteString)
+import Data.Array.BitArray.ST (thaw, unsafeFreeze, writeArray)
+import Data.Binary (Word32, decode)
+import Data.Maybe (listToMaybe)
+import Data.STM.LinkedList
 import qualified Data.ByteString.Char8 as BS
 import qualified Data.ByteString.Lazy.Char8 as BL
 
-import Data.Array.BitArray
-import Data.Array.BitArray.ST (thaw, unsafeFreeze, writeArray)
-import Data.Array.BitArray.ByteString (fromByteString)
-import Data.Binary
-import Data.STM.LinkedList
-import Data.Maybe (listToMaybe)
+import Network.HTTP (simpleHTTP, getRequest, rspBody)
+import Network.Socket (Socket)
+import Network.Socket.ByteString (recv)
+
+import System.IO (withBinaryFile, hSeek, IOMode(..), SeekMode(..))
+import System.IO.Error (tryIOError)
 
 import Data.Torrent
-import Network.BitTorrent.Tracker
 import Network.BitTorrent.Peer
-
-import Network.HTTP hiding (Response, Request)
-import Network.Socket (Socket)
-import Network.Socket.ByteString
+import Network.BitTorrent.Tracker
 
 data Client = Client
     { clientId :: BS.ByteString
-    -- , clientDownload :: TVar Download
     , activePeers :: TVar Int
     }
-
-createClient :: BS.ByteString -> IO Client
-createClient peerId = Client peerId <$> newTVarIO 0
 
 data Download = Download
     { dTorrent :: Torrent
@@ -46,7 +50,7 @@ data Download = Download
     , dActivePieces :: LinkedList [(Word32, TVar BlockState)]
     -- ^ list of pieces currently downloading.
     --   after download of piece is complete,
-    --   its hash is checked and piece is written to disk
+    --   its hash is checked, piece is written to disk
     --   and removed from list
     }
 
@@ -57,18 +61,8 @@ data BlockState = BlockNotRequested Message
 data TrackerState = TrackerState
     { tsTracker :: BS.ByteString
     , tsTrackerResponse :: TVar TrackerResponse
-    , tsUpdateDelay :: TrackerUpdateState
+    , tsUpdateDelay :: TVar (Maybe Delay)
     }
-
-type TrackerUpdateState = TVar (Maybe Delay)
-
-updateWait :: TrackerUpdateState -> STM ()
-updateWait st = do
-    mDelay <- readTVar st
-    case mDelay of
-        Nothing -> retry
-        Just delay -> waitDelay delay
-    writeTVar st Nothing
 
 data PeerState = PeerState
     { psPeer :: Peer
@@ -78,24 +72,47 @@ data PeerState = PeerState
     , psWeInterested :: TVar Bool
     , psWeUnchocked :: TVar Bool
     , psPieces :: TVar PiecesPresentArray
+    , psDownload :: Download
     }
+
+data PeerStateSnapshot = PeerStateSnapshot
+    { pssPeer :: Peer
+    , pssInterested :: Bool
+    , pssUnchocked :: Bool
+    , pssWeInterested :: Bool
+    , pssWeUnchocked :: Bool
+    , pssPieces :: PiecesPresentArray
+    }
+
+peerStateToSnapshot :: PeerState -> STM PeerStateSnapshot
+peerStateToSnapshot ps =
+    PeerStateSnapshot (psPeer ps)
+        <$> readTVar (psInterested ps)
+        <*> readTVar (psUnchocked ps)
+        <*> readTVar (psWeInterested ps)
+        <*> readTVar (psWeUnchocked ps)
+        <*> readTVar (psPieces ps)
 
 type PiecesPresentArray = BitArray Word32
 
+createClient :: BS.ByteString -> IO Client
+createClient peerId = Client peerId <$> newTVarIO 0
+
 bitArrayForTorrent :: Torrent -> BitArray Word32
-bitArrayForTorrent t = array (0, numPieces t) []
+bitArrayForTorrent t = array (0, numPieces t - 1) []
 
 bitArrayFromString :: Torrent -> BS.ByteString -> BitArray Word32
-bitArrayFromString t str = fromByteString (0, numPieces t) str
+bitArrayFromString t str = fromByteString (0, numPieces t - 1) str
 
-newPeerState :: Torrent -> Peer -> Socket -> IO PeerState
-newPeerState t peer socket =
+newPeerState :: Download -> Peer -> Socket -> IO PeerState
+newPeerState download peer socket =
     PeerState peer socket
         <$> newTVarIO False
         <*> newTVarIO False
         <*> newTVarIO False
         <*> newTVarIO False
-        <*> newTVarIO (bitArrayForTorrent t)
+        <*> newTVarIO (bitArrayForTorrent $ dTorrent download)
+        <*> pure download
 
 announceToURI :: Client -> Torrent -> BS.ByteString -> IO TrackerResponse
 announceToURI client torrent announce = do
@@ -107,7 +124,7 @@ announceToURI client torrent announce = do
             case res of
                 Left err -> Left $ show err
                 Right rsp -> decodeResponse . BS.pack $ rspBody rsp
-    
+
 pollTracker :: Client -> Torrent -> BS.ByteString -> IO TrackerState
 pollTracker client torrent announce = do
     state <- TrackerState announce
@@ -115,17 +132,24 @@ pollTracker client torrent announce = do
         <*> (newTVarIO . Just =<< newDelay 0)
     forkIO $ updateTracker client torrent state
     return state
-    
+
 updateTracker :: Client -> Torrent -> TrackerState -> IO ()
-updateTracker client torrent (TrackerState tracker responseVar delay) = forever $ do
-    atomically $ updateWait delay
-    response <- announceToURI client torrent tracker
-    atomically $ writeTVar responseVar response
-    let delayInterval = 1000000 * case response of
-            Failure _ -> 20
-            Response interval _ -> interval
-    d <- newDelay $ fromIntegral delayInterval
-    atomically $ writeTVar delay (Just d)
+updateTracker client torrent (TrackerState tracker responseVar delayVar) = forever $ do
+        atomically waitUpdate
+        response <- announceToURI client torrent tracker
+        d <- newDelay $ 1000000 * case response of
+                Failure _ -> 20
+                Response interval _ -> fromIntegral interval
+        atomically $ do
+            writeTVar delayVar (Just d)
+            writeTVar responseVar response
+    where
+        waitUpdate = do
+            mDelay <- readTVar delayVar
+            case mDelay of
+                Nothing -> retry
+                Just delay -> waitDelay delay
+            writeTVar delayVar Nothing
 
 startDownload :: Client -> Torrent -> IO Download
 startDownload client torrent = do
@@ -146,34 +170,44 @@ downloadBackground client download = do
 handlePeer :: Client -> Download -> Peer -> IO ()
 handlePeer client download peer = do
     putStrLn $ "Connecting to " ++ show peer
-    conn_ <- connectToPeer peer
-    case conn_ of
+    conn <- connectToPeer peer
+    case conn of
         Left err -> putStrLn $ "Error: " ++ err
-        Right conn -> do
-            sendHandshake (clientId client) (getInfoHash $ dTorrent download) conn
-            response <- decode . BL.fromStrict <$> recv conn 68 :: IO Handshake
+        Right sock -> do
+            sendHandshake (clientId client) (getInfoHash $ dTorrent download) sock
+            response <- decode . BL.fromStrict <$> recv sock 68 :: IO Handshake
             putStr "Got response: "
             print response
             -- TODO: Check handshake
-            peerState <- newPeerState (dTorrent download) peer conn
+            peerState <- newPeerState download peer sock
             node <- atomically $ do
                 incTVar $ activePeers client
                 append peerState (dPeers download)
-            mapM_ (handleMessage download peerState) =<< socketToMessages conn
+            mapM_ (handleMessage peerState) =<< socketToMessages sock
             atomically $ do
                 decTVar $ activePeers client
                 delete node
-            return ()
-                
-handleMessage :: Download -> PeerState -> Either String Message -> IO ()
-handleMessage _ _ (Left str) = putStrLn $ "Error: " ++ str
-handleMessage download peerState (Right msg) = do
+    where
+        incTVar var = do
+            val <- readTVar var
+            writeTVar var (val + 1)
+            return $ val + 1
+
+        decTVar var = do
+            val <- readTVar var
+            writeTVar var (val - 1)
+            return $ val - 1
+
+
+handleMessage :: PeerState -> Either String Message -> IO ()
+handleMessage _ (Left str) = putStrLn $ "Error: " ++ str
+handleMessage peerState (Right msg) = do
     print msg
     case msg of
         Bitfield str -> do
             atomically $
-                writeTVar (psPieces peerState) (bitArrayFromString (dTorrent download) str)
-            checkInterested download peerState
+                writeTVar (psPieces peerState) (bitArrayFromString (dTorrent $ psDownload peerState) str)
+            checkInterested peerState
         Have i -> do
             atomically $ do
                 bitarray <- readTVar $ psPieces peerState
@@ -182,20 +216,20 @@ handleMessage download peerState (Right msg) = do
                     writeArray arr i True
                     unsafeFreeze arr
                 writeTVar (psPieces peerState) new
-            checkInterested download peerState
+            checkInterested peerState
         Choke -> atomically $ writeTVar (psWeUnchocked peerState) False
         Unchoke -> do
             atomically $ writeTVar (psWeUnchocked peerState) True
-            enqueueBlocks download peerState
+            enqueueBlocks peerState
         Interested -> atomically $ writeTVar (psInterested peerState) True
         NotInterested -> atomically $ writeTVar (psInterested peerState) False
         Piece idx begin block -> do
-            act <- atomically $ addBlock download idx begin block
+            act <- atomically $ saveBlock (psDownload peerState) idx begin block
             act
         _ -> return ()
 
-addBlock :: Download -> Word32 -> Word32 -> BS.ByteString -> STM (IO ())
-addBlock download idx begin block = do
+saveBlock :: Download -> Word32 -> Word32 -> BS.ByteString -> STM (IO ())
+saveBlock download idx begin block = do
     mblock <- findBlock (dActivePieces download) idx begin
     case mblock of
         Nothing -> return $ do
@@ -208,11 +242,11 @@ addBlock download idx begin block = do
             when isCompl $ do
                 delete node
                 modifyTVar' (dPiecesPresent download) (// [(idx, True)])
-            return $ if isCompl then writeToDisk download idx wholeList else return ()
+            return $ if isCompl then writePieceToFile download idx wholeList else return ()
 
-writeToDisk :: Download -> Word32 -> [(Word32, TVar BlockState)] -> IO ()
-writeToDisk download idx lst = do
-    putStrLn "Writing block to disk"
+writePieceToFile :: Download -> Word32 -> [(Word32, TVar BlockState)] -> IO ()
+writePieceToFile download idx lst = do
+    putStrLn "Writing piece to file"
     allChunksStates <- forM lst $ \(_, var) -> readTVarIO var
     let piece = BS.concat $ fmap (\(BlockCompleted str) -> str) allChunksStates
     let pieceSize = idPieceLength . tInfoDict . dTorrent $ download
@@ -222,11 +256,11 @@ writeToDisk download idx lst = do
 
 isCompletedPiece :: [(Word32, TVar BlockState)] -> STM Bool
 isCompletedPiece lst = all isCompleted <$> (forM lst $ \(_, var) -> readTVar var)
+    where
+        isCompleted (BlockCompleted _) = True
+        isCompleted _ = False
 
-isCompleted :: BlockState -> Bool
-isCompleted (BlockCompleted _) = True
-isCompleted _ = False
-
+-- TODO: Refactor this
 findBlock :: LinkedList [(Word32, TVar BlockState)] -> Word32 -> Word32 -> STM (Maybe (Node [(Word32, TVar BlockState)], TVar BlockState))
 findBlock list idx begin = do
     mnode <- start list
@@ -249,31 +283,30 @@ recurseFindBlock (Just node) idx begin = do
                 BlockRequested (Request midx mbegin _) _ -> return $ idx == midx && begin == mbegin
                 _ -> return False
 
-enqueueBlocks :: Download -> PeerState -> IO ()
-enqueueBlocks download peerState = do
+enqueueBlocks :: PeerState -> IO ()
+enqueueBlocks peerState = do
     block <- atomically $ do
-        blocks <- pickBlock download peerState
+        blocks <- pickBlock peerState
         forM blocks $ \block -> do
             BlockNotRequested msg <- readTVar block
-            writeTVar block (BlockRequested msg [peerState])
+            writeTVar block $ BlockRequested msg [peerState]
             return msg
     forM_ block $ \x -> sendMessage x (psSocket peerState)
 
-pickBlock :: Download -> PeerState -> STM [TVar BlockState]
-pickBlock download ps = do
-    -- ourPieces <- readTVar $ dPiecesPresent download
-    -- peerPieces <- readTVar $ psPieces ps
-    -- let interestingPieces = zipWith (\x y -> y && not x) ourPieces peerPieces
-    unfinished <- getUnfinishedBlocks download
+-- | Picks next blocks to request from client
+pickBlock :: PeerState -> STM [TVar BlockState]
+pickBlock ps = do
+    unfinished <- getUnenqueued (psDownload ps)
     case unfinished of
         Left [] -> return []
         Left lst -> do
             xs <- filterM (ps `hasPiece`) lst
             case xs of
                 [] -> return []
-                (x:_) -> enqueuePiece download x
+                (x:_) -> enqueuePiece (psDownload ps) x
         Right msgs -> return msgs
 
+-- | Checks whether peer has given piece
 hasPiece :: PeerState -> Word32 -> STM Bool
 hasPiece PeerState{ psPieces = piecesVar } piece = do
     piecesPresent <- readTVar piecesVar
@@ -282,29 +315,28 @@ hasPiece PeerState{ psPieces = piecesVar } piece = do
 enqueuePiece :: Download -> Word32 -> STM [TVar BlockState]
 enqueuePiece Download{ dTorrent = torrent, dActivePieces = activePieces } idx = do
     let msgs = pieceToMessages torrent idx
-    node <- forM msgs $ \msg -> do
+    pieceInfo <- forM msgs $ \msg -> do
         tvar <- newTVar $ BlockNotRequested msg
         return (idx, tvar)
-    append node activePieces
-    return $ fmap snd node
-        
-getUnfinishedBlocks :: Download -> STM (Either [Word32] [TVar BlockState] )
-getUnfinishedBlocks download = do
-    unfinished <- filterActiveBlocks notRequested download
-    if Prelude.null unfinished
-        then do
-            pieces <- getUnfinishedPieces download
-            return $ Left pieces
-        else return . Right . fmap snd $ unfinished
+    append pieceInfo activePieces
+    return $ fmap snd pieceInfo
 
-getUnfinishedPieces :: Download -> STM [Word32]
-getUnfinishedPieces Download{ dPiecesPresent = piecesPresentVar } = do
+getUnenqueued :: Download -> STM (Either [Word32] [TVar BlockState] )
+getUnenqueued download = do
+        unfinished <- filterActiveBlocks notRequested download
+        if Prelude.null unfinished
+            then do
+                pieces <- getUnenqueuedPieces download
+                return $ Left pieces
+            else return . Right . fmap snd $ unfinished
+    where
+        notRequested (_,BlockNotRequested _) = True
+        notRequested _ = False
+
+getUnenqueuedPieces :: Download -> STM [Word32]
+getUnenqueuedPieces Download{ dPiecesPresent = piecesPresentVar } = do
     piecesPresent <- readTVar piecesPresentVar
     return . fmap fst . filter (not.snd) $ assocs piecesPresent
-
-notRequested :: (Word32, BlockState) -> Bool
-notRequested (_,BlockNotRequested _) = True
-notRequested _ = False
 
 filterActiveBlocks :: ((Word32, BlockState) -> Bool) -> Download -> STM [(Word32, TVar BlockState)]
 filterActiveBlocks f Download{ dActivePieces = activePieces } = do
@@ -312,7 +344,7 @@ filterActiveBlocks f Download{ dActivePieces = activePieces } = do
     unpackedPacked <- sequence $ do
         pieceBlock <- pieces
         original <- pieceBlock
-        return $ do 
+        return $ do
             let (piece, blockStateVar) = original
             blockState <- readTVar blockStateVar
             return ((piece, blockState), original)
@@ -329,40 +361,27 @@ pieceToMessages t idx = fmap blockToMessage [0..nBlocks-1]
         blockToMessage block = Request idx (fromIntegral block * fromIntegral len) blockLen
             where blockLen = fromIntegral $ min (sizeOfPiece - block * len) len
 
-checkInterested :: Download -> PeerState -> IO ()
-checkInterested download peerState = do
+checkInterested :: PeerState -> IO ()
+checkInterested peerState = do
     should <- atomically $ do
         weInterested <- readTVar $ psWeInterested peerState
         if weInterested
             then return False
             else do
-                sbi <- shouldBeInterested download peerState
-                writeTVar (psWeInterested peerState) sbi
-                return sbi
+                hasPieces <- hasNeededPieces peerState
+                writeTVar (psWeInterested peerState) hasPieces
+                return hasPieces
     when should $ sendMessage Interested (psSocket peerState)
 
-shouldBeInterested :: Download -> PeerState -> STM Bool
-shouldBeInterested download ps = do
+hasNeededPieces :: PeerState -> STM Bool
+hasNeededPieces ps = do
     peerPieces <- readTVar $ psPieces ps
-    ourPieces <- readTVar $ dPiecesPresent download
+    ourPieces <- readTVar . dPiecesPresent $ psDownload ps
     return $ or $ zipWith (\x y -> y && not x) ourPieces peerPieces
-
-incTVar :: (Num a) => TVar a -> STM a
-incTVar var = do
-    val <- readTVar var
-    writeTVar var (val + 1)
-    return $ val + 1
-
-decTVar :: (Num a) => TVar a -> STM a
-decTVar var = do
-    val <- readTVar var
-    writeTVar var (val - 1)
-    return $ val - 1
 
 waitForPeers :: Download -> STM [Peer]
 waitForPeers download = do
-    let responseVar = tsTrackerResponse $ dTracker download
-    response <- readTVar responseVar
+    response <- readTVar $ tsTrackerResponse $ dTracker download
     case response of
         Response _ peers | not $ Prelude.null peers -> return peers
         _ -> retry
