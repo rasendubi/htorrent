@@ -1,8 +1,6 @@
 module Network.BitTorrent.Client
 where
 
-import Debug.Trace
-
 import Prelude hiding (zipWith, or)
 
 import System.IO
@@ -12,7 +10,6 @@ import Control.Concurrent
 import Control.Concurrent.STM
 import Control.Concurrent.STM.Delay
 import Control.Monad
-import Control.Monad.STM
 import Control.Monad.ST
 import qualified Data.ByteString.Char8 as BS
 import qualified Data.ByteString.Lazy.Char8 as BL
@@ -22,7 +19,6 @@ import Data.Array.BitArray.ST (thaw, unsafeFreeze, writeArray)
 import Data.Array.BitArray.ByteString (fromByteString)
 import Data.Binary
 import Data.STM.LinkedList
-import Data.List (find)
 import Data.Maybe (listToMaybe)
 
 import Data.Torrent
@@ -209,9 +205,10 @@ addBlock download idx begin block = do
             writeTVar var (BlockCompleted block)
             let wholeList = value node
             isCompl <- isCompletedPiece wholeList
-            let result = if isCompl then writeToDisk download idx wholeList else return ()
-            when isCompl $ delete node
-            return result
+            when isCompl $ do
+                delete node
+                modifyTVar' (dPiecesPresent download) (// [(idx, True)])
+            return $ if isCompl then writeToDisk download idx wholeList else return ()
 
 writeToDisk :: Download -> Word32 -> [(Word32, TVar BlockState)] -> IO ()
 writeToDisk download idx lst = do
@@ -232,7 +229,6 @@ isCompleted _ = False
 
 findBlock :: LinkedList [(Word32, TVar BlockState)] -> Word32 -> Word32 -> STM (Maybe (Node [(Word32, TVar BlockState)], TVar BlockState))
 findBlock list idx begin = do
-    traceShowM =<< (Prelude.length <$> toList list)
     mnode <- start list
     recurseFindBlock mnode idx begin
 
@@ -353,15 +349,15 @@ shouldBeInterested download ps = do
 
 incTVar :: (Num a) => TVar a -> STM a
 incTVar var = do
-    value <- readTVar var
-    writeTVar var (value + 1)
-    return $ value + 1
+    val <- readTVar var
+    writeTVar var (val + 1)
+    return $ val + 1
 
 decTVar :: (Num a) => TVar a -> STM a
 decTVar var = do
-    value <- readTVar var
-    writeTVar var (value - 1)
-    return $ value - 1
+    val <- readTVar var
+    writeTVar var (val - 1)
+    return $ val - 1
 
 waitForPeers :: Download -> STM [Peer]
 waitForPeers download = do
