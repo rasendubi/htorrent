@@ -85,7 +85,7 @@ totalLength InfoDict { idFiles = Just files } = sum' $ map fiLength files
 totalLength _ = undefined
 
 numPieces :: Num a => Torrent -> a
-numPieces t = fromIntegral $ totalLen + pieceLen - 1 `div` pieceLen
+numPieces t = fromIntegral $ (totalLen + pieceLen - 1) `div` pieceLen
     where
         totalLen = totalLength $ tInfoDict t
         pieceLen = idPieceLength $ tInfoDict t

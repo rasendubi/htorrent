@@ -33,14 +33,7 @@ main = do
     forM_ args $ \file -> runEitherT $ do
         torrent <- hoistEither =<< lift (T.fromFile file)
         lputStrLn $ file ++ ": " ++ show torrent
-        download <- lift $ startDownload client torrent
-        -- lprint download
-        -- let announce = tAnnounce torrent
-        -- state <- lift $ pollTracker client torrent announce
-        -- lift $ trackChanges onTrackerResponseChanged (tsTrackerResponse state)
-        -- let (Response _ peers) = response
-        -- lift $ forM_ peers (tryPeer torrent)
-        return ()
+        lift $ startDownload client torrent
     forever yield
 
 onTrackerResponseChanged resp = do
@@ -62,20 +55,6 @@ trackFurther action var prev = do
             else return val
     action value
     trackFurther action var value
-
-tryPeer :: Torrent -> Peer -> IO ()
-tryPeer torrent peer = do
-    putStrLn $ "\nConnecting to " ++ show peer
-    conn_ <- connectToPeer peer
-    case conn_ of
-        Left err -> putStrLn $ "Error: " ++ err
-        Right conn -> do
-            sendHandshake peerId (getInfoHash torrent) conn
-            response <- decode . BL.fromStrict <$> recv conn 68 :: IO Handshake
-            putStr "Got response: "
-            print response
-            sendMessage Interested conn
-            -- mapM_ (handleMessage conn torrent) =<< socketToMessages conn
 
 handleMessage :: Socket -> Torrent -> Either String Message -> IO ()
 handleMessage _ _ (Left str) = putStrLn $ "Error: " ++ str
