@@ -39,6 +39,9 @@ data Client = Client
     , activePeers :: TVar Int
     }
 
+createClient :: BS.ByteString -> IO Client
+createClient peerId = Client peerId <$> newTVarIO 0
+
 data Download = Download
     { dTorrent :: Torrent
     , dTracker :: TrackerState
