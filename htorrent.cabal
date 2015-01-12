@@ -45,4 +45,5 @@ executable client
                      , network
                      , binary
                      , stm
+                     , bencoding
   ghc-options:         -Wall -fno-warn-unused-do-bind

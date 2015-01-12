@@ -5,6 +5,7 @@ module Data.Torrent
     , InfoDict(..)
     , FileInfo(..)
     , fromFile
+    , toFile
     , getInfoHash
     , toHex
     , totalLength
@@ -13,14 +14,17 @@ module Data.Torrent
 
 import qualified Crypto.Hash.SHA1 as SHA1
 import Data.BEncode as BE
+import Data.BEncode.BDict as BE
 import qualified Data.ByteString as BS
+import qualified Data.ByteString.Lazy as BL
 import qualified Data.ByteString.Char8 as C
 import Data.Typeable
 import Text.Printf
 import Data.List (foldl')
 
 data Torrent = Torrent
-    { tAnnounce :: BS.ByteString
+    { tInfoHash :: BS.ByteString
+    , tAnnounce :: BS.ByteString
     , tInfoDict :: InfoDict
     } deriving (Show, Read, Eq, Typeable)
 
@@ -38,9 +42,12 @@ data FileInfo = FileInfo
     } deriving (Show, Read, Eq, Typeable)
 
 instance BEncode Torrent where
-    fromBEncode = fromDict $
-        Torrent <$>! "announce"
-                <*>! "info"
+    fromBEncode d@(BDict dict)
+        | Just info <- BE.lookup "info" dict = flip fromDict d $
+            Torrent (SHA1.hashlazy $ BE.encode info)
+                    <$>! "announce"
+                    <*>! "info"
+    fromBEncode _ = fail "info should be dict"
     toBEncode t = toDict $
            "announce" .=! tAnnounce t
         .: "info" .=! tInfoDict t
@@ -73,15 +80,18 @@ instance BEncode FileInfo where
 fromFile :: String -> IO (Either String Torrent)
 fromFile = fmap BE.decode . BS.readFile
 
+toFile :: Torrent -> String -> IO ()
+toFile torrent file = BS.writeFile file . BL.toStrict $ BE.encode torrent
+
 getInfoHash :: Torrent -> BS.ByteString
-getInfoHash = SHA1.hashlazy . BE.encode . tInfoDict
+getInfoHash = tInfoHash
 
 toHex :: BS.ByteString -> String
 toHex bytes = printf "%02x" =<< C.unpack bytes
 
 totalLength :: InfoDict -> Integer
 totalLength InfoDict { idLength = Just len } = len
-totalLength InfoDict { idFiles = Just files } = sum' $ map fiLength files
+totalLength InfoDict { idFiles = Just files } = sum' $ fmap fiLength files
     where sum' = foldl' (+) 0
 totalLength _ = undefined
 

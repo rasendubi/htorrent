@@ -1,6 +1,10 @@
 {-# LANGUAGE OverloadedStrings #-}
 module Main(main) where
 
+import qualified Data.ByteString as BS
+import Data.BEncode as BE
+import Data.BEncode.BDict as BE
+
 import Control.Concurrent
 import Control.Concurrent.STM
 import Data.Torrent as T
@@ -21,7 +25,6 @@ main = do
         _ -> return ()
     forM_ args $ \file -> runEitherT $ do
         torrent <- hoistEither =<< lift (T.fromFile file)
-        lift $ putStrLn $ file ++ ": " ++ show torrent
         lift $ startDownload client torrent
         lift $ trackChanges onActivePeersChanged $ activePeers client
     forever yield
