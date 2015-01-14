@@ -52,6 +52,7 @@ data Download = Download
     --   after download of piece is complete,
     --   its hash is checked, piece is written to disk
     --   and removed from list
+    , dPath :: FilePath
     }
 
 data BlockState = BlockNotRequested Message
@@ -153,13 +154,14 @@ updateTracker client torrent (TrackerState tracker responseVar delayVar) = forev
                 Just delay -> waitDelay delay
             writeTVar delayVar Nothing
 
-startDownload :: Client -> Torrent -> IO Download
-startDownload client torrent = do
+startDownload :: Client -> Torrent -> FilePath -> IO Download
+startDownload client torrent path = do
     download <- Download torrent
              <$> pollTracker client torrent (tAnnounce torrent)
              <*> List.emptyIO
              <*> newTVarIO (bitArrayForTorrent torrent)
              <*> List.emptyIO
+             <*> pure path
     forkIO $ downloadBackground client download
     return download
 
@@ -257,7 +259,7 @@ writePieceToFile download idx lst = do
     allChunksStates <- forM lst $ \(_, var) -> readTVarIO var
     let piece = BS.concat $ fmap (\(BlockCompleted str) -> str) allChunksStates
     let pieceSize = idPieceLength . tInfoDict . dTorrent $ download
-    withBinaryFile (BS.unpack . idName . tInfoDict . dTorrent $ download) ReadWriteMode $ \h -> do
+    withBinaryFile (dPath download) ReadWriteMode $ \h -> do
         hSeek h AbsoluteSeek (fromIntegral idx * pieceSize)
         BS.hPut h piece
 
