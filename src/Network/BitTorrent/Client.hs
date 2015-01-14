@@ -22,7 +22,7 @@ import Data.Array.BitArray.ByteString (fromByteString)
 import Data.Array.BitArray.ST (thaw, unsafeFreeze, writeArray)
 import Data.Binary (Word32, decode)
 import Data.Maybe (listToMaybe)
-import Data.STM.LinkedList
+import qualified Data.STM.LinkedList as List
 import qualified Data.ByteString.Char8 as BS
 import qualified Data.ByteString.Lazy.Char8 as BL
 
@@ -45,9 +45,9 @@ data Client = Client
 data Download = Download
     { dTorrent :: Torrent
     , dTracker :: TrackerState
-    , dPeers :: LinkedList PeerState
+    , dPeers :: List.LinkedList PeerState
     , dPiecesPresent :: TVar PiecesPresentArray
-    , dActivePieces :: LinkedList [(Word32, TVar BlockState)]
+    , dActivePieces :: List.LinkedList [(Word32, TVar BlockState)]
     -- ^ list of pieces currently downloading.
     --   after download of piece is complete,
     --   its hash is checked, piece is written to disk
@@ -73,6 +73,7 @@ data PeerState = PeerState
     , psWeUnchocked :: TVar Bool
     , psPieces :: TVar PiecesPresentArray
     , psDownload :: Download
+    , psEnqueuedNumber :: TVar Int
     }
 
 data PeerStateSnapshot = PeerStateSnapshot
@@ -113,6 +114,7 @@ newPeerState download peer socket =
         <*> newTVarIO False
         <*> newTVarIO (bitArrayForTorrent $ dTorrent download)
         <*> pure download
+        <*> newTVarIO 0
 
 announceToURI :: Client -> Torrent -> BS.ByteString -> IO TrackerResponse
 announceToURI client torrent announce = do
@@ -155,9 +157,9 @@ startDownload :: Client -> Torrent -> IO Download
 startDownload client torrent = do
     download <- Download torrent
              <$> pollTracker client torrent (tAnnounce torrent)
-             <*> emptyIO
+             <*> List.emptyIO
              <*> newTVarIO (bitArrayForTorrent torrent)
-             <*> emptyIO
+             <*> List.emptyIO
     forkIO $ downloadBackground client download
     return download
 
@@ -182,11 +184,11 @@ handlePeer client download peer = do
             peerState <- newPeerState download peer sock
             node <- atomically $ do
                 incTVar $ activePeers client
-                append peerState (dPeers download)
+                List.append peerState (dPeers download)
             mapM_ (handleMessage peerState) =<< socketToMessages sock
             atomically $ do
                 decTVar $ activePeers client
-                delete node
+                List.delete node
     where
         incTVar var = do
             val <- readTVar var
@@ -202,7 +204,6 @@ handlePeer client download peer = do
 handleMessage :: PeerState -> Either String Message -> IO ()
 handleMessage _ (Left str) = putStrLn $ "Error: " ++ str
 handleMessage peerState (Right msg) = do
-    print msg
     case msg of
         Bitfield str -> do
             atomically $
@@ -224,9 +225,14 @@ handleMessage peerState (Right msg) = do
         Interested -> atomically $ writeTVar (psInterested peerState) True
         NotInterested -> atomically $ writeTVar (psInterested peerState) False
         Piece idx begin block -> do
-            act <- atomically $ saveBlock (psDownload peerState) idx begin block
+            putStr "Got block: "
+            print (idx, begin)
+            act <- atomically $ do
+                modifyTVar (psEnqueuedNumber peerState) (subtract 1)
+                saveBlock (psDownload peerState) idx begin block
             act
-        _ -> return ()
+            enqueueBlocks peerState
+        _ -> putStr "Unhandled: " >> print msg
 
 saveBlock :: Download -> Word32 -> Word32 -> BS.ByteString -> STM (IO ())
 saveBlock download idx begin block = do
@@ -237,16 +243,17 @@ saveBlock download idx begin block = do
             print (idx, begin)
         Just (node, var) -> do
             writeTVar var (BlockCompleted block)
-            let wholeList = value node
+            let wholeList = List.value node
             isCompl <- isCompletedPiece wholeList
             when isCompl $ do
-                delete node
+                List.delete node
                 modifyTVar' (dPiecesPresent download) (// [(idx, True)])
             return $ if isCompl then writePieceToFile download idx wholeList else return ()
 
 writePieceToFile :: Download -> Word32 -> [(Word32, TVar BlockState)] -> IO ()
 writePieceToFile download idx lst = do
-    putStrLn "Writing piece to file"
+    putStr "Writing piece to file: "
+    print idx
     allChunksStates <- forM lst $ \(_, var) -> readTVarIO var
     let piece = BS.concat $ fmap (\(BlockCompleted str) -> str) allChunksStates
     let pieceSize = idPieceLength . tInfoDict . dTorrent $ download
@@ -261,18 +268,18 @@ isCompletedPiece lst = all isCompleted <$> (forM lst $ \(_, var) -> readTVar var
         isCompleted _ = False
 
 -- TODO: Refactor this
-findBlock :: LinkedList [(Word32, TVar BlockState)] -> Word32 -> Word32 -> STM (Maybe (Node [(Word32, TVar BlockState)], TVar BlockState))
+findBlock :: List.LinkedList [(Word32, TVar BlockState)] -> Word32 -> Word32 -> STM (Maybe (List.Node [(Word32, TVar BlockState)], TVar BlockState))
 findBlock list idx begin = do
-    mnode <- start list
+    mnode <- List.start list
     recurseFindBlock mnode idx begin
 
-recurseFindBlock :: Maybe (Node [(Word32, TVar BlockState)]) -> Word32 -> Word32 -> STM (Maybe (Node [(Word32, TVar BlockState)], TVar BlockState))
+recurseFindBlock :: Maybe (List.Node [(Word32, TVar BlockState)]) -> Word32 -> Word32 -> STM (Maybe (List.Node [(Word32, TVar BlockState)], TVar BlockState))
 recurseFindBlock Nothing _ _ = return Nothing
 recurseFindBlock (Just node) idx begin = do
-    el <- listToMaybe <$> filterM blockInList (value node)
+    el <- listToMaybe <$> filterM blockInList (List.value node)
     case el of
         Nothing -> do
-            n <- next node
+            n <- List.next node
             recurseFindBlock n idx begin
         Just (_,e) -> return $ Just (node, e)
     where
@@ -286,12 +293,21 @@ recurseFindBlock (Just node) idx begin = do
 enqueueBlocks :: PeerState -> IO ()
 enqueueBlocks peerState = do
     block <- atomically $ do
-        blocks <- pickBlock peerState
-        forM blocks $ \block -> do
-            BlockNotRequested msg <- readTVar block
-            writeTVar block $ BlockRequested msg [peerState]
-            return msg
-    forM_ block $ \x -> sendMessage x (psSocket peerState)
+        n <- readTVar $ psEnqueuedNumber peerState
+        result <- if n > 10
+            then return []
+            else do
+                blocks <- pickBlock peerState
+                forM blocks $ \block -> do
+                    BlockNotRequested msg <- readTVar block
+                    writeTVar block $ BlockRequested msg [peerState]
+                    return msg
+        modifyTVar' (psEnqueuedNumber peerState) (+ length result)
+        return result
+    forM_ block $ \x -> do
+        putStr "Requesting block: "
+        print x
+        sendMessage x (psSocket peerState)
 
 -- | Picks next blocks to request from client
 pickBlock :: PeerState -> STM [TVar BlockState]
@@ -318,7 +334,7 @@ enqueuePiece Download{ dTorrent = torrent, dActivePieces = activePieces } idx = 
     pieceInfo <- forM msgs $ \msg -> do
         tvar <- newTVar $ BlockNotRequested msg
         return (idx, tvar)
-    append pieceInfo activePieces
+    List.append pieceInfo activePieces
     return $ fmap snd pieceInfo
 
 getUnenqueued :: Download -> STM (Either [Word32] [TVar BlockState] )
@@ -340,7 +356,7 @@ getUnenqueuedPieces Download{ dPiecesPresent = piecesPresentVar } = do
 
 filterActiveBlocks :: ((Word32, BlockState) -> Bool) -> Download -> STM [(Word32, TVar BlockState)]
 filterActiveBlocks f Download{ dActivePieces = activePieces } = do
-    pieces <- toList activePieces
+    pieces <- List.toList activePieces
     unpackedPacked <- sequence $ do
         pieceBlock <- pieces
         original <- pieceBlock
