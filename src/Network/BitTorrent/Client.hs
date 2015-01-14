@@ -1,3 +1,4 @@
+{-# LANGUAGE OverloadedStrings #-}
 module Network.BitTorrent.Client
     ( Client(..)
     , TrackerState(..)
@@ -31,6 +32,7 @@ import Network.HTTP (simpleHTTP, getRequest, rspBody)
 import Network.Socket (Socket)
 import Network.Socket.ByteString (recv)
 
+import System.Directory (createDirectoryIfMissing)
 import System.IO (withBinaryFile, hSeek, IOMode(..), SeekMode(..))
 import System.IO.Error (tryIOError)
 
@@ -250,17 +252,30 @@ saveBlock download idx begin block = do
             when isCompl $ do
                 List.delete node
                 modifyTVar' (dPiecesPresent download) (// [(idx, True)])
-            return $ if isCompl then writePieceToFile download idx wholeList else return ()
+            return $ if isCompl then writeTorrentPiece download idx wholeList else return ()
 
-writePieceToFile :: Download -> Word32 -> [(Word32, TVar BlockState)] -> IO ()
-writePieceToFile download idx lst = do
+writeTorrentPiece :: Download -> Word32 -> [(Word32, TVar BlockState)] -> IO ()
+writeTorrentPiece download idx lst = do
     infoM "HTorrent.Client" $ "Writing piece to file: " ++ show idx
     allChunksStates <- forM lst $ \(_, var) -> readTVarIO var
     let piece = BS.concat $ fmap (\(BlockCompleted str) -> str) allChunksStates
     let pieceSize = idPieceLength . tInfoDict . dTorrent $ download
-    withBinaryFile (dPath download) ReadWriteMode $ \h -> do
-        hSeek h AbsoluteSeek (fromIntegral idx * pieceSize)
-        BS.hPut h piece
+    writeBlockToFile (dTorrent download) (dPath download) piece (fromIntegral idx * pieceSize)
+
+writeBlockToFile :: Torrent -> FilePath -> BS.ByteString -> Integer -> IO ()
+writeBlockToFile torrent path piece pos
+    | BS.null piece = return ()
+    | otherwise     = do
+        let (fileChain, offset, maxLen) = offsetToFile torrent pos
+        let pathChain = BS.pack path : fileChain
+        let filePath = BS.unpack . BS.intercalate "/" $ pathChain
+        let dirPath = BS.unpack . BS.intercalate "/" $ init pathChain
+        createDirectoryIfMissing True dirPath
+        let (this,next) = BS.splitAt (fromIntegral maxLen) piece
+        withBinaryFile filePath ReadWriteMode $ \h -> do
+            hSeek h AbsoluteSeek offset
+            BS.hPut h this
+        writeBlockToFile torrent path next (pos + maxLen)
 
 isCompletedPiece :: [(Word32, TVar BlockState)] -> STM Bool
 isCompletedPiece lst = all isCompleted <$> (forM lst $ \(_, var) -> readTVar var)
