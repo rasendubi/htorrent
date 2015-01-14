@@ -37,6 +37,8 @@ import Data.Torrent
 import Network.BitTorrent.Peer
 import Network.BitTorrent.Tracker
 
+import System.Log.Logger
+
 data Client = Client
     { clientId :: BS.ByteString
     , activePeers :: TVar Int
@@ -173,15 +175,14 @@ downloadBackground client download = do
 
 handlePeer :: Client -> Download -> Peer -> IO ()
 handlePeer client download peer = do
-    putStrLn $ "Connecting to " ++ show peer
+    infoM "HTorrent.Client" $ "Connecting to " ++ show peer
     conn <- connectToPeer peer
     case conn of
-        Left err -> putStrLn $ "Error: " ++ err
+        Left err -> warningM "HTorrent.Client" $ "Error: " ++ err
         Right sock -> do
             sendHandshake (clientId client) (getInfoHash $ dTorrent download) sock
             response <- decode . BL.fromStrict <$> recv sock 68 :: IO Handshake
-            putStr "Got response: "
-            print response
+            debugM "HTorrent.Client" $ "Got response: " ++ show response
             -- TODO: Check handshake
             peerState <- newPeerState download peer sock
             node <- atomically $ do
@@ -204,7 +205,7 @@ handlePeer client download peer = do
 
 
 handleMessage :: PeerState -> Either String Message -> IO ()
-handleMessage _ (Left str) = putStrLn $ "Error: " ++ str
+handleMessage _ (Left str) = warningM "HTorrent.Client" $ "Error: " ++ str
 handleMessage peerState (Right msg) = do
     case msg of
         Bitfield str -> do
@@ -227,22 +228,20 @@ handleMessage peerState (Right msg) = do
         Interested -> atomically $ writeTVar (psInterested peerState) True
         NotInterested -> atomically $ writeTVar (psInterested peerState) False
         Piece idx begin block -> do
-            putStr "Got block: "
-            print (idx, begin)
+            infoM "HTorrent.Client" $ "Got block: " ++ show (idx, begin)
             act <- atomically $ do
                 modifyTVar (psEnqueuedNumber peerState) (subtract 1)
                 saveBlock (psDownload peerState) idx begin block
             act
             enqueueBlocks peerState
-        _ -> putStr "Unhandled: " >> print msg
+        _ -> warningM "HTorrent.Client" $ "Unhandled: " ++ show msg
 
 saveBlock :: Download -> Word32 -> Word32 -> BS.ByteString -> STM (IO ())
 saveBlock download idx begin block = do
     mblock <- findBlock (dActivePieces download) idx begin
     case mblock of
         Nothing -> return $ do
-            putStr "Error: Can't find downloaded block: "
-            print (idx, begin)
+            errorM "HTorrent.Client" $ "Error: Can't find downloaded block: " ++ show (idx, begin)
         Just (node, var) -> do
             writeTVar var (BlockCompleted block)
             let wholeList = List.value node
@@ -254,8 +253,7 @@ saveBlock download idx begin block = do
 
 writePieceToFile :: Download -> Word32 -> [(Word32, TVar BlockState)] -> IO ()
 writePieceToFile download idx lst = do
-    putStr "Writing piece to file: "
-    print idx
+    infoM "HTorrent.Client" $ "Writing piece to file: " ++ show idx
     allChunksStates <- forM lst $ \(_, var) -> readTVarIO var
     let piece = BS.concat $ fmap (\(BlockCompleted str) -> str) allChunksStates
     let pieceSize = idPieceLength . tInfoDict . dTorrent $ download
@@ -307,8 +305,7 @@ enqueueBlocks peerState = do
         modifyTVar' (psEnqueuedNumber peerState) (+ length result)
         return result
     forM_ block $ \x -> do
-        putStr "Requesting block: "
-        print x
+        infoM "HTorrent.Client" $ "Requesting block: " ++ show x
         sendMessage x (psSocket peerState)
 
 -- | Picks next blocks to request from client

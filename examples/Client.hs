@@ -2,8 +2,6 @@
 module Main(main) where
 
 import qualified Data.ByteString.Char8 as BS
-import Data.BEncode as BE
-import Data.BEncode.BDict as BE
 
 import Control.Concurrent
 import Control.Concurrent.STM
@@ -16,8 +14,11 @@ import System.Environment
 import Control.Monad.Trans.Either
 import Control.Monad.Trans
 
+import System.Log.Logger
+
 main :: IO ()
 main = do
+    updateGlobalLogger rootLoggerName (setLevel DEBUG)
     args <- getArgs
     client <- createClient "HASKELL7TORRENT5YEAH"
     case args of
