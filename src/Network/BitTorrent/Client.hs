@@ -21,6 +21,7 @@ import Data.Array.BitArray
 import Data.Array.BitArray.ByteString (fromByteString)
 import Data.Array.BitArray.ST (thaw, unsafeFreeze, writeArray)
 import Data.Binary (Word32, decode)
+import Data.List (nub, (\\))
 import Data.Maybe (listToMaybe)
 import qualified Data.STM.LinkedList as List
 import qualified Data.ByteString.Char8 as BS
@@ -348,10 +349,20 @@ getUnenqueued download = do
         notRequested (_,BlockNotRequested _) = True
         notRequested _ = False
 
-getUnenqueuedPieces :: Download -> STM [Word32]
-getUnenqueuedPieces Download{ dPiecesPresent = piecesPresentVar } = do
+getUnfinishedPieces :: Download -> STM [Word32]
+getUnfinishedPieces Download{ dPiecesPresent = piecesPresentVar } = do
     piecesPresent <- readTVar piecesPresentVar
     return . fmap fst . filter (not.snd) $ assocs piecesPresent
+
+getQueuedPieces :: Download -> STM [Word32]
+getQueuedPieces Download{ dActivePieces = activePiecesVar } =
+    return . nub . fmap (fst . head) =<< List.toList activePiecesVar
+
+getUnenqueuedPieces :: Download -> STM [Word32]
+getUnenqueuedPieces download = do
+    unfinished <- getUnfinishedPieces download
+    queued <- getQueuedPieces download
+    return $ unfinished \\ queued
 
 filterActiveBlocks :: ((Word32, BlockState) -> Bool) -> Download -> STM [(Word32, TVar BlockState)]
 filterActiveBlocks f Download{ dActivePieces = activePieces } = do
