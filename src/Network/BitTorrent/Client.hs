@@ -18,6 +18,8 @@ import Control.Concurrent.STM.Delay
 import Control.Monad
 import Control.Monad.ST (runST)
 
+import qualified Crypto.Hash.SHA1 as SHA1
+
 import Data.Array.BitArray
 import Data.Array.BitArray.ByteString (fromByteString)
 import Data.Array.BitArray.ST (thaw, unsafeFreeze, writeArray)
@@ -196,16 +198,8 @@ handlePeer client download peer = do
                 decTVar $ activePeers client
                 List.delete node
     where
-        incTVar var = do
-            val <- readTVar var
-            writeTVar var (val + 1)
-            return $ val + 1
-
-        decTVar var = do
-            val <- readTVar var
-            writeTVar var (val - 1)
-            return $ val - 1
-
+        incTVar var = modifyTVar' var (+1)
+        decTVar var = modifyTVar' var (subtract 1)
 
 handleMessage :: PeerState -> Either String Message -> IO ()
 handleMessage _ (Left str) = warningM "HTorrent.Client" $ "Error: " ++ str
@@ -249,18 +243,18 @@ saveBlock download idx begin block = do
             writeTVar var (BlockCompleted block)
             let wholeList = List.value node
             isCompl <- isCompletedPiece wholeList
-            when isCompl $ do
+            onlyIf isCompl $ do
                 List.delete node
-                modifyTVar' (dPiecesPresent download) (// [(idx, True)])
-            return $ if isCompl then writeTorrentPiece download idx wholeList else return ()
-
-writeTorrentPiece :: Download -> Word32 -> [(Word32, TVar BlockState)] -> IO ()
-writeTorrentPiece download idx lst = do
-    infoM "HTorrent.Client" $ "Writing piece to file: " ++ show idx
-    allChunksStates <- forM lst $ \(_, var) -> readTVarIO var
-    let piece = BS.concat $ fmap (\(BlockCompleted str) -> str) allChunksStates
-    let pieceSize = idPieceLength . tInfoDict . dTorrent $ download
-    writeBlockToFile (dTorrent download) (dPath download) piece (fromIntegral idx * pieceSize)
+                allChunksStates <- forM wholeList $ \(_, state) -> readTVar state
+                let piece = BS.concat $ fmap (\(BlockCompleted str) -> str) allChunksStates
+                let pieceSize = idPieceLength . tInfoDict . dTorrent $ download
+                let realPieceHash = SHA1.hash piece
+                let expectedPieceHash = pieceHash (dTorrent download) (fromIntegral idx)
+                onlyIf (expectedPieceHash == realPieceHash) $ do
+                    modifyTVar' (dPiecesPresent download) (// [(idx, True)])
+                    return $ writeBlockToFile (dTorrent download) (dPath download) piece (fromIntegral idx * pieceSize)
+    where
+        onlyIf cond x = if cond then x else return $ return ()
 
 writeBlockToFile :: Torrent -> FilePath -> BS.ByteString -> Integer -> IO ()
 writeBlockToFile torrent path piece pos

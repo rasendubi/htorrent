@@ -11,6 +11,7 @@ module Data.Torrent
     , totalLength
     , numPieces
     , offsetToFile
+    , pieceHash
     ) where
 
 import qualified Crypto.Hash.SHA1 as SHA1
@@ -118,3 +119,6 @@ offsetToFile torrent offset =
             ((fo,fi):_) -> (fiPath fi, offset - fo, fiLength fi - (offset - fo))
     where
         rest = dropWhile ((> offset) . fst) $ reverse $ filesWithOffsets torrent
+
+pieceHash :: Torrent -> Int -> BS.ByteString
+pieceHash torrent idx = BS.take 20 . BS.drop (20 * idx) . idPieces $ tInfoDict torrent
