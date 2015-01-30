@@ -47,6 +47,7 @@ import System.Log.Logger
 data Client = Client
     { clientId :: BS.ByteString
     , activePeers :: TVar Int
+    , writerChan :: TChan (Download, Word32, BS.ByteString)
     }
 
 data Download = Download
@@ -60,6 +61,7 @@ data Download = Download
     --   its hash is checked, piece is written to disk
     --   and removed from list
     , dPath :: FilePath
+    , dClient :: Client
     }
 
 data BlockState = BlockNotRequested Message
@@ -105,7 +107,26 @@ peerStateToSnapshot ps =
 type PiecesPresentArray = BitArray Word32
 
 createClient :: BS.ByteString -> IO Client
-createClient peerId = Client peerId <$> newTVarIO 0
+createClient peerId = do
+    writerChannel <- newTChanIO
+    forkIO $ writer writerChannel
+    Client peerId <$> newTVarIO 0 <*> pure writerChannel
+
+writer :: TChan (Download, Word32, BS.ByteString) -> IO ()
+writer channel = do
+    (download, idx, block) <- atomically $ readTChan channel
+    forkIO $ writePiece download idx block
+    writer channel
+
+writePiece :: Download -> Word32 -> BS.ByteString -> IO ()
+writePiece download idx piece = do
+    putStrLn $ "Writing to index: " ++ show idx
+    let pieceSize = idPieceLength . tInfoDict . dTorrent $ download
+    let realPieceHash = SHA1.hash piece
+    let expectedPieceHash = pieceHash (dTorrent download) (fromIntegral idx)
+    if realPieceHash == expectedPieceHash
+        then writeBlockToFile (dTorrent download) (dPath download) piece (fromIntegral idx * pieceSize)
+        else atomically $ modifyTVar' (dPiecesPresent download) (// [(idx, False)])
 
 bitArrayForTorrent :: Torrent -> BitArray Word32
 bitArrayForTorrent t = array (0, numPieces t - 1) []
@@ -127,6 +148,7 @@ newPeerState download peer socket =
 announceToURI :: Client -> Torrent -> BS.ByteString -> IO TrackerResponse
 announceToURI client torrent announce = do
     let uri = BS.unpack $ announce `BS.append` announceParams torrent (clientId client)
+    infoM "HTorrent.Client" $ "announcing to " ++ show uri
     resp <- tryIOError (simpleHTTP $ getRequest uri)
     case resp of
         Left err -> return . Failure . BS.pack $ show err
@@ -153,6 +175,7 @@ updateTracker client torrent (TrackerState tracker responseVar delayVar) = forev
         atomically $ do
             writeTVar delayVar (Just d)
             writeTVar responseVar response
+        infoM "HTorrent.Client" $ show response
     where
         waitUpdate = do
             mDelay <- readTVar delayVar
@@ -169,6 +192,7 @@ startDownload client torrent path = do
              <*> newTVarIO (bitArrayForTorrent torrent)
              <*> List.emptyIO
              <*> pure path
+             <*> pure client
     forkIO $ downloadBackground client download
     return download
 
@@ -243,18 +267,13 @@ saveBlock download idx begin block = do
             writeTVar var (BlockCompleted block)
             let wholeList = List.value node
             isCompl <- isCompletedPiece wholeList
-            onlyIf isCompl $ do
+            when isCompl $ do
                 List.delete node
                 allChunksStates <- forM wholeList $ \(_, state) -> readTVar state
                 let piece = BS.concat $ fmap (\(BlockCompleted str) -> str) allChunksStates
-                let pieceSize = idPieceLength . tInfoDict . dTorrent $ download
-                let realPieceHash = SHA1.hash piece
-                let expectedPieceHash = pieceHash (dTorrent download) (fromIntegral idx)
-                onlyIf (expectedPieceHash == realPieceHash) $ do
-                    modifyTVar' (dPiecesPresent download) (// [(idx, True)])
-                    return $ writeBlockToFile (dTorrent download) (dPath download) piece (fromIntegral idx * pieceSize)
-    where
-        onlyIf cond x = if cond then x else return $ return ()
+                writeTChan (writerChan $ dClient download) (download, idx, piece)
+                modifyTVar' (dPiecesPresent download) (// [(idx, True)])
+            return $ return ()
 
 writeBlockToFile :: Torrent -> FilePath -> BS.ByteString -> Integer -> IO ()
 writeBlockToFile torrent path piece pos
