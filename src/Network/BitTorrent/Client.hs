@@ -14,7 +14,6 @@ import Prelude hiding (zipWith, or)
 import Control.Applicative ((<$>), (<*>), pure)
 import Control.Concurrent (forkIO)
 import Control.Concurrent.STM
-import Control.Concurrent.STM.Delay
 import Control.Monad
 import Control.Monad.ST (runST)
 
@@ -30,13 +29,11 @@ import qualified Data.STM.LinkedList as List
 import qualified Data.ByteString.Char8 as BS
 import qualified Data.ByteString.Lazy.Char8 as BL
 
-import Network.HTTP (simpleHTTP, getRequest, rspBody)
 import Network.Socket (Socket)
 import Network.Socket.ByteString (recv)
 
 import System.Directory (createDirectoryIfMissing)
 import System.IO (withBinaryFile, hSeek, IOMode(..), SeekMode(..))
-import System.IO.Error (tryIOError)
 
 import Data.Torrent
 import Network.BitTorrent.Peer
@@ -67,12 +64,6 @@ data Download = Download
 data BlockState = BlockNotRequested Message
                 | BlockRequested Message [PeerState]
                 | BlockCompleted BS.ByteString
-
-data TrackerState = TrackerState
-    { tsTracker :: BS.ByteString
-    , tsTrackerResponse :: TVar TrackerResponse
-    , tsUpdateDelay :: TVar (Maybe Delay)
-    }
 
 data PeerState = PeerState
     { psPeer :: Peer
@@ -145,49 +136,10 @@ newPeerState download peer socket =
         <*> pure download
         <*> newTVarIO 0
 
-announceToURI :: Client -> Torrent -> BS.ByteString -> IO TrackerResponse
-announceToURI client torrent announce = do
-    let uri = BS.unpack $ announce `BS.append` announceParams torrent (clientId client)
-    infoM "HTorrent.Client" $ "announcing to " ++ show uri
-    resp <- tryIOError (simpleHTTP $ getRequest uri)
-    case resp of
-        Left err -> return . Failure . BS.pack $ show err
-        Right res -> return $ either (Failure . BS.pack) id $
-            case res of
-                Left err -> Left $ show err
-                Right rsp -> decodeResponse . BS.pack $ rspBody rsp
-
-pollTracker :: Client -> Torrent -> BS.ByteString -> IO TrackerState
-pollTracker client torrent announce = do
-    state <- TrackerState announce
-        <$> newTVarIO (Failure $ BS.pack "Not requested")
-        <*> (newTVarIO . Just =<< newDelay 0)
-    forkIO $ updateTracker client torrent state
-    return state
-
-updateTracker :: Client -> Torrent -> TrackerState -> IO ()
-updateTracker client torrent (TrackerState tracker responseVar delayVar) = forever $ do
-        atomically waitUpdate
-        response <- announceToURI client torrent tracker
-        d <- newDelay $ 1000000 * case response of
-                Failure _ -> 20
-                Response interval _ -> fromIntegral interval
-        atomically $ do
-            writeTVar delayVar (Just d)
-            writeTVar responseVar response
-        infoM "HTorrent.Client" $ show response
-    where
-        waitUpdate = do
-            mDelay <- readTVar delayVar
-            case mDelay of
-                Nothing -> retry
-                Just delay -> waitDelay delay
-            writeTVar delayVar Nothing
-
 startDownload :: Client -> Torrent -> FilePath -> IO Download
 startDownload client torrent path = do
     download <- Download torrent
-             <$> pollTracker client torrent (tAnnounce torrent)
+             <$> pollTracker (clientId client) torrent (tAnnounce torrent)
              <*> List.emptyIO
              <*> newTVarIO (bitArrayForTorrent torrent)
              <*> List.emptyIO
