@@ -13,6 +13,8 @@ library
                      , Network.BitTorrent.Peer
                      , Network.BitTorrent.Tracker
   other-modules:       Network.BitTorrent.Tracker.HTTP
+                     , Network.BitTorrent.Tracker.UDP
+                     , Network.BitTorrent.Tracker.Types
   other-extensions:    OverloadedStrings, DeriveDataTypeable
   build-depends:       base == 4.*
                      , bytestring >=0.10
