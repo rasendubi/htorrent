@@ -33,6 +33,7 @@ library
                      , bitwise
                      , hslogger
                      , directory
+                     , uri
   hs-source-dirs:      src
   default-language:    Haskell2010
   ghc-options:         -Wall -fno-warn-unused-do-bind

@@ -3,8 +3,6 @@
 module Network.BitTorrent.Tracker.Types where
 
 import Control.Applicative ((<$>), (<*>))
-import Control.Concurrent.STM
-import Control.Concurrent.STM.Delay
 
 import Data.Binary
 import Data.Binary.Get
@@ -12,11 +10,7 @@ import Data.Bits
 import qualified Data.ByteString.Char8 as BS
 import Data.Typeable
 
-data TrackerState = TrackerState
-    { tsTracker :: BS.ByteString
-    , tsTrackerResponse :: TVar TrackerResponse
-    , tsUpdateDelay :: TVar (Maybe Delay)
-    }
+import Text.URI (URI)
 
 data TrackerResponse
     = Failure { fReason :: BS.ByteString }
@@ -27,10 +21,13 @@ data TrackerResponse
     deriving (Read, Show, Eq, Typeable)
 
 data Peer = Peer
-    { pPeerId :: Maybe BS.ByteString
+    { pPeerId :: Maybe PeerId
     , pIp :: BS.ByteString
     , pPort :: Word16
     }
+    deriving (Read, Show, Eq, Typeable)
+
+newtype PeerId = PeerId { fromPeerId :: BS.ByteString }
     deriving (Read, Show, Eq, Typeable)
 
 instance Binary Peer where

@@ -1,17 +1,24 @@
+{-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE RecordWildCards #-}
 module Network.BitTorrent.Tracker.UDP
-    (
+    ( updater
     ) where
 
-import Control.Applicative ((<$>), (<*>))
+import Control.Applicative (pure, (<$>), (<*>))
+import Control.Concurrent.STM
 
 import Data.Binary
 import Data.Binary.Get
 import Data.Binary.Put
-import qualified Data.ByteString as BS
+import qualified Data.ByteString.Char8 as BS
 import qualified Data.ByteString.Lazy as BL
 
+import Text.URI
+
+import Data.Torrent
 import Network.BitTorrent.Tracker.Types
+
+import System.Log.Logger
 
 data UdpTrackerRequest
     = ConnectRequest
@@ -147,3 +154,6 @@ putMany = putManyWith put
 
 putManyWith :: (a -> Put) -> [a] -> Put
 putManyWith = mapM_
+
+updater :: PeerId -> Torrent -> URI -> IO TrackerResponse
+updater peerId torrent uri = return $ Failure "UDP not implemented"

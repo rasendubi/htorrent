@@ -139,7 +139,7 @@ newPeerState download peer socket =
 startDownload :: Client -> Torrent -> FilePath -> IO Download
 startDownload client torrent path = do
     download <- Download torrent
-             <$> pollTracker (clientId client) torrent (tAnnounce torrent)
+             <$> pollTracker (PeerId $ clientId client) torrent (tAnnounce torrent)
              <*> List.emptyIO
              <*> newTVarIO (bitArrayForTorrent torrent)
              <*> List.emptyIO
