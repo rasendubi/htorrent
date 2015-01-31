@@ -218,10 +218,7 @@ updater peerId torrent uri = do
             connectionId <- getConnectionId
             liftIO $ debugM "HTorrent.Tracker.UDP" $ "Connection id: " ++ show connectionId
             AnnounceResponse{..} <- sendAnnounce peerId torrent
-            -- liftIO $ debugM "HTorrent.Tracker.UDP" $ "Response: " ++ show resp
             return $ TrackerResponse{ rInterval = fromIntegral apInterval, rPeers = apPeers }
-
-    -- return $ TrackerFailure "UDP is not implemented"
 
 openSocket :: URI -> IO Socket
 openSocket uri = do

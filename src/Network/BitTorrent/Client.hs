@@ -17,8 +17,6 @@ import Control.Concurrent.STM
 import Control.Monad
 import Control.Monad.ST (runST)
 
-import qualified Crypto.Hash.SHA1 as SHA1
-
 import Data.Array.BitArray
 import Data.Array.BitArray.ByteString (fromByteString)
 import Data.Array.BitArray.ST (thaw, unsafeFreeze, writeArray)
@@ -32,33 +30,28 @@ import qualified Data.ByteString.Lazy.Char8 as BL
 import Network.Socket (Socket)
 import Network.Socket.ByteString (recv)
 
-import System.Directory (createDirectoryIfMissing)
-import System.IO (withBinaryFile, hSeek, IOMode(..), SeekMode(..))
-
 import Data.Torrent
 import Network.BitTorrent.Peer
 import Network.BitTorrent.Tracker
+import System.Torrent.Storage
 
 import System.Log.Logger
 
 data Client = Client
     { clientId :: BS.ByteString
     , activePeers :: TVar Int
-    , writerChan :: TChan (Download, Word32, BS.ByteString)
     }
 
 data Download = Download
     { dTorrent :: Torrent
     , dTracker :: TrackerState
     , dPeers :: List.LinkedList PeerState
-    , dPiecesPresent :: TVar PiecesPresentArray
     , dActivePieces :: List.LinkedList [(Word32, TVar BlockState)]
     -- ^ list of pieces currently downloading.
     --   after download of piece is complete,
     --   its hash is checked, piece is written to disk
     --   and removed from list
-    , dPath :: FilePath
-    , dClient :: Client
+    , dStorage :: Storage
     }
 
 data BlockState = BlockNotRequested Message
@@ -95,29 +88,8 @@ peerStateToSnapshot ps =
         <*> readTVar (psWeUnchocked ps)
         <*> readTVar (psPieces ps)
 
-type PiecesPresentArray = BitArray Word32
-
 createClient :: BS.ByteString -> IO Client
-createClient peerId = do
-    writerChannel <- newTChanIO
-    forkIO $ writer writerChannel
-    Client peerId <$> newTVarIO 0 <*> pure writerChannel
-
-writer :: TChan (Download, Word32, BS.ByteString) -> IO ()
-writer channel = do
-    (download, idx, block) <- atomically $ readTChan channel
-    forkIO $ writePiece download idx block
-    writer channel
-
-writePiece :: Download -> Word32 -> BS.ByteString -> IO ()
-writePiece download idx piece = do
-    putStrLn $ "Writing to index: " ++ show idx
-    let pieceSize = idPieceLength . tInfoDict . dTorrent $ download
-    let realPieceHash = SHA1.hash piece
-    let expectedPieceHash = pieceHash (dTorrent download) (fromIntegral idx)
-    if realPieceHash == expectedPieceHash
-        then writeBlockToFile (dTorrent download) (dPath download) piece (fromIntegral idx * pieceSize)
-        else atomically $ modifyTVar' (dPiecesPresent download) (// [(idx, False)])
+createClient peerId = Client peerId <$> newTVarIO 0
 
 bitArrayForTorrent :: Torrent -> BitArray Word32
 bitArrayForTorrent t = array (0, numPieces t - 1) []
@@ -141,10 +113,8 @@ startDownload client torrent path = do
     download <- Download torrent
              <$> pollTracker (PeerId $ clientId client) torrent (tAnnounce torrent)
              <*> List.emptyIO
-             <*> newTVarIO (bitArrayForTorrent torrent)
              <*> List.emptyIO
-             <*> pure path
-             <*> pure client
+             <*> createStorage torrent path
     forkIO $ downloadBackground client download
     return download
 
@@ -223,24 +193,8 @@ saveBlock download idx begin block = do
                 List.delete node
                 allChunksStates <- forM wholeList $ \(_, state) -> readTVar state
                 let piece = BS.concat $ fmap (\(BlockCompleted str) -> str) allChunksStates
-                writeTChan (writerChan $ dClient download) (download, idx, piece)
-                modifyTVar' (dPiecesPresent download) (// [(idx, True)])
+                writePiece (dStorage download) idx piece
             return $ return ()
-
-writeBlockToFile :: Torrent -> FilePath -> BS.ByteString -> Integer -> IO ()
-writeBlockToFile torrent path piece pos
-    | BS.null piece = return ()
-    | otherwise     = do
-        let (fileChain, offset, maxLen) = offsetToFile torrent pos
-        let pathChain = BS.pack path : fileChain
-        let filePath = BS.unpack . BS.intercalate "/" $ pathChain
-        let dirPath = BS.unpack . BS.intercalate "/" $ init pathChain
-        createDirectoryIfMissing True dirPath
-        let (this,next) = BS.splitAt (fromIntegral maxLen) piece
-        withBinaryFile filePath ReadWriteMode $ \h -> do
-            hSeek h AbsoluteSeek offset
-            BS.hPut h this
-        writeBlockToFile torrent path next (pos + maxLen)
 
 isCompletedPiece :: [(Word32, TVar BlockState)] -> STM Bool
 isCompletedPiece lst = all isCompleted <$> (forM lst $ \(_, var) -> readTVar var)
@@ -329,18 +283,13 @@ getUnenqueued download = do
         notRequested (_,BlockNotRequested _) = True
         notRequested _ = False
 
-getUnfinishedPieces :: Download -> STM [Word32]
-getUnfinishedPieces Download{ dPiecesPresent = piecesPresentVar } = do
-    piecesPresent <- readTVar piecesPresentVar
-    return . fmap fst . filter (not.snd) $ assocs piecesPresent
-
 getQueuedPieces :: Download -> STM [Word32]
 getQueuedPieces Download{ dActivePieces = activePiecesVar } =
     return . nub . fmap (fst . head) =<< List.toList activePiecesVar
 
 getUnenqueuedPieces :: Download -> STM [Word32]
 getUnenqueuedPieces download = do
-    unfinished <- getUnfinishedPieces download
+    unfinished <- getUnfinishedPieces (dStorage download)
     queued <- getQueuedPieces download
     return $ unfinished \\ queued
 
@@ -382,8 +331,7 @@ checkInterested peerState = do
 hasNeededPieces :: PeerState -> STM Bool
 hasNeededPieces ps = do
     peerPieces <- readTVar $ psPieces ps
-    ourPieces <- readTVar . dPiecesPresent $ psDownload ps
-    return $ or $ zipWith (\x y -> y && not x) ourPieces peerPieces
+    containsNeededPieces (dStorage $ psDownload ps) peerPieces
 
 waitForPeers :: Download -> STM [Peer]
 waitForPeers download = do

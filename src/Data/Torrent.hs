@@ -10,7 +10,6 @@ module Data.Torrent
     , toHex
     , totalLength
     , numPieces
-    , offsetToFile
     , pieceHash
     ) where
 
@@ -102,23 +101,6 @@ numPieces t = fromIntegral $ (totalLen + pieceLen - 1) `div` pieceLen
     where
         totalLen = totalLength $ tInfoDict t
         pieceLen = idPieceLength $ tInfoDict t
-
-filesWithOffsets :: Torrent -> [(Integer, FileInfo)]
-filesWithOffsets Torrent{ tInfoDict = InfoDict{ idFiles = Nothing } } = []
-filesWithOffsets Torrent{ tInfoDict = InfoDict{ idFiles = Just files } } =
-    enumerateFiles 0 files
-
-enumerateFiles :: Integer -> [FileInfo] -> [(Integer, FileInfo)]
-enumerateFiles _ [] = []
-enumerateFiles offset (x:xs) = (offset, x) : enumerateFiles (offset + fiLength x) xs
-
-offsetToFile :: Torrent -> Integer -> ([BS.ByteString], Integer, Integer)
-offsetToFile torrent offset =
-        case rest of
-            []          -> ([], offset, totalLength $ tInfoDict torrent)
-            ((fo,fi):_) -> (fiPath fi, offset - fo, fiLength fi - (offset - fo))
-    where
-        rest = dropWhile ((> offset) . fst) $ reverse $ filesWithOffsets torrent
 
 pieceHash :: Torrent -> Int -> BS.ByteString
 pieceHash torrent idx = BS.take 20 . BS.drop (20 * idx) . idPieces $ tInfoDict torrent
