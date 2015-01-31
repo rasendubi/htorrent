@@ -28,9 +28,9 @@ newtype HttpResponse = HttpResponse { trackerResponse :: TrackerResponse }
 
 instance BEncode HttpResponse where
     fromBEncode d@(BDict dict) = HttpResponse <$> case BE.lookup "failure reason" dict of
-        Just (BString str) -> return $ Failure str
+        Just (BString str) -> return $ TrackerFailure str
         Nothing -> flip fromDict d $ do
-            Response <$> field (req "interval") <*> (bencodeToPeerList =<< req "peers")
+            TrackerResponse <$> field (req "interval") <*> (bencodeToPeerList =<< req "peers")
         _ -> fail "Failure reason should be string"
     fromBEncode _ = fail "Tracker response should be dictionary"
 
@@ -64,8 +64,8 @@ updater clientId torrent announce = do
     infoM "HTorrent.Tracker.HTTP" $ "announcing to " ++ show uri
     resp <- tryIOError (simpleHTTP $ getRequest uri)
     case resp of
-        Left err -> return . Failure . BS.pack $ show err
-        Right res -> return $ either (Failure . BS.pack) id $
+        Left err -> return . TrackerFailure . BS.pack $ show err
+        Right res -> return $ either (TrackerFailure . BS.pack) id $
             case res of
                 Left err -> Left $ show err
                 Right rsp -> decodeResponse . BS.pack $ rspBody rsp

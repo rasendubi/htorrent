@@ -44,7 +44,7 @@ tracker urlString peerId torrent =
 pollTracker' :: URI -> IO TrackerResponse -> IO TrackerState
 pollTracker' announce updater = do
     state <- TrackerState (BS.pack $ show announce)
-        <$> newTVarIO (Failure $ "Not Requested")
+        <$> newTVarIO (TrackerFailure $ "Not Requested")
         <*> (newTVarIO . Just =<< newDelay 0)
     forkIO $ updateTracker state updater
     return state
@@ -54,8 +54,8 @@ updateTracker (TrackerState _ responseVar delayVar) updater = forever $ do
         atomically waitUpdate
         response <- updater
         d <- newDelay $ 1000000 * case response of
-                Failure _ -> 20
-                Response interval _ -> fromIntegral interval
+                TrackerFailure _ -> 20
+                TrackerResponse interval _ -> fromIntegral interval
         atomically $ do
             writeTVar delayVar (Just d)
             writeTVar responseVar response
@@ -71,5 +71,5 @@ updateTracker (TrackerState _ responseVar delayVar) updater = forever $ do
 updaterError :: BS.ByteString -> BS.ByteString -> IO TrackerState
 updaterError uri reason =
     TrackerState uri
-        <$> newTVarIO (Failure reason)
+        <$> newTVarIO (TrackerFailure reason)
         <*> newTVarIO Nothing

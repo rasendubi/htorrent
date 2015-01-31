@@ -389,5 +389,5 @@ waitForPeers :: Download -> STM [Peer]
 waitForPeers download = do
     response <- readTVar $ tsTrackerResponse $ dTracker download
     case response of
-        Response _ peers | not $ Prelude.null peers -> return peers
+        TrackerResponse _ peers | not $ Prelude.null peers -> return peers
         _ -> retry

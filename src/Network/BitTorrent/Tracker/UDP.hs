@@ -1,10 +1,15 @@
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE RecordWildCards #-}
+{-# LANGUAGE ScopedTypeVariables #-}
 module Network.BitTorrent.Tracker.UDP
     ( updater
     ) where
 
-import Control.Applicative (pure, (<$>), (<*>))
+import Control.Applicative ((<$>), (<*>))
+import Control.Monad
+import qualified Control.Monad.State as S
+import Control.Monad.State (liftIO)
+import Control.Exception
 import Control.Concurrent.STM
 
 import Data.Binary
@@ -15,6 +20,9 @@ import qualified Data.ByteString.Lazy as BL
 
 import Text.URI
 
+import Network.Socket hiding (send, sendTo, recv, recvFrom)
+import Network.Socket.ByteString
+
 import Data.Torrent
 import Network.BitTorrent.Tracker.Types
 
@@ -22,8 +30,7 @@ import System.Log.Logger
 
 data UdpTrackerRequest
     = ConnectRequest
-        { cqConnectionId :: !Word64
-        , cqTransactionId :: !Word32
+        { cqTransactionId :: !Word32
         }
     | AnnounceRequest
         { aqConnectionId :: !Word64
@@ -44,38 +51,42 @@ data UdpTrackerRequest
         , sqTransactionId :: !Word32
         , sqInfoHash :: [BS.ByteString]
         }
+    deriving (Show)
 
 data UdpTrackerResponse
     = ConnectResponse
-        { cpTransactionId :: !Word32
+        { tpTransactionId :: !Word32
         , cpConnectionId :: !Word64
         }
     | AnnounceResponse
-        { apTransactionId :: !Word32
+        { tpTransactionId :: !Word32
         , apInterval :: !Word32
         , apLeechers :: !Word32
         , apSeeders :: !Word32
         , apPeers :: [Peer]
         }
     | ScrapeResponse
-        { spTransactionId :: !Word32
+        { tpTransactionId :: !Word32
         , spScrapes :: [Scrape]
         }
     | ErrorResponse
-        { epTransactionId :: !Word32
+        { tpTransactionId :: !Word32
         , epMessage :: BS.ByteString
         }
+    deriving (Show)
 
 data Scrape = Scrape { sSeeders :: !Word32
                      , sCompleted :: !Word32
                      , sLeechers :: !Word32
                      }
+    deriving (Show)
 
 data Event = None | Completed | Started | Stopped
+    deriving (Show)
 
 instance Binary UdpTrackerRequest where
     put ConnectRequest{..} = do
-        putWord64be cqConnectionId
+        putWord64be 0x41727101980
         putWord32be 0
         putWord32be cqTransactionId
     put AnnounceRequest{..} = do
@@ -155,5 +166,92 @@ putMany = putManyWith put
 putManyWith :: (a -> Put) -> [a] -> Put
 putManyWith = mapM_
 
+data TrackState = TrackState { tsSock :: !Socket
+                             , tsTransactionId :: !Word32
+                             , tsConnectionId :: !Word64
+                             }
+
+type TrackerMonad = S.StateT TrackState IO
+
+evalTracker :: Socket -> TrackerMonad a -> IO a
+evalTracker sock x = S.evalStateT x (TrackState sock 0 0)
+
+nextTransaction :: TrackerMonad Word32
+nextTransaction = do
+    state <- S.get
+    S.put $ state {tsTransactionId = tsTransactionId state + 1}
+    return $ tsTransactionId state
+
+sendRequest :: UdpTrackerRequest -> TrackerMonad ()
+sendRequest request = do
+    sock <- S.gets tsSock
+    liftIO $ print request
+    void $ liftIO $ send sock $ BL.toStrict $ encode request
+
+receiveResponse :: TrackerMonad UdpTrackerResponse
+receiveResponse = do
+    sock <- S.gets tsSock
+    liftIO $ decode . BL.fromStrict <$> recv sock 1024
+
+getConnectionId :: TrackerMonad Word64
+getConnectionId = S.gets tsConnectionId
+
+runTransaction :: (Word64 -> Word32 -> UdpTrackerRequest) -> TrackerMonad UdpTrackerResponse
+runTransaction packet = do
+    transaction <- nextTransaction
+    connectionId <- getConnectionId
+    sendRequest $ packet connectionId transaction
+    waitForResponse transaction
+
+waitForResponse :: Word32 -> TrackerMonad UdpTrackerResponse
+waitForResponse transaction = do
+    resp <- receiveResponse
+    if tpTransactionId resp == transaction
+        then return resp
+        else waitForResponse transaction
+
 updater :: PeerId -> Torrent -> URI -> IO TrackerResponse
-updater peerId torrent uri = return $ Failure "UDP not implemented"
+updater peerId torrent uri = do
+    bracket (openSocket uri) close $ \sock ->
+        evalTracker sock $ do
+            sendConnectRequest
+            connectionId <- getConnectionId
+            liftIO $ debugM "HTorrent.Tracker.UDP" $ "Connection id: " ++ show connectionId
+            AnnounceResponse{..} <- sendAnnounce peerId torrent
+            -- liftIO $ debugM "HTorrent.Tracker.UDP" $ "Response: " ++ show resp
+            return $ TrackerResponse{ rInterval = fromIntegral apInterval, rPeers = apPeers }
+
+    -- return $ TrackerFailure "UDP is not implemented"
+
+openSocket :: URI -> IO Socket
+openSocket uri = do
+    addrInfo <- getAddrInfo Nothing (uriRegName uri) (fmap show (uriPort uri) `mplus` Just "6969")
+    let serverAddr = head addrInfo
+    sock <- socket (addrFamily serverAddr) Datagram defaultProtocol
+    connect sock (addrAddress serverAddr)
+    return sock
+
+sendConnectRequest :: TrackerMonad UdpTrackerResponse
+sendConnectRequest = do
+    resp@ConnectResponse{ cpConnectionId = connectionId } <- runTransaction (const ConnectRequest)
+    S.modify' $ \s -> s{ tsConnectionId = connectionId }
+    return resp
+
+sendAnnounce :: PeerId -> Torrent -> TrackerMonad UdpTrackerResponse
+sendAnnounce (PeerId peerId) torrent =
+        runTransaction $ \connectionId transactionId ->
+            AnnounceRequest
+                { aqConnectionId = connectionId
+                , aqTransactionId = transactionId
+                , aqInfoHash = infoHash
+                , aqPeerId = peerId
+                , aqDownloaded = 0
+                , aqLeft = 0
+                , aqUploaded = 0
+                , aqEvent = None
+                , aqIpAddress = 0
+                , aqKey = 0
+                , aqNumWant = -1
+                , aqPort = 0
+                }
+    where infoHash = tInfoHash torrent

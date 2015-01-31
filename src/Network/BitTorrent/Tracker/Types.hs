@@ -10,11 +10,9 @@ import Data.Bits
 import qualified Data.ByteString.Char8 as BS
 import Data.Typeable
 
-import Text.URI (URI)
-
 data TrackerResponse
-    = Failure { fReason :: BS.ByteString }
-    | Response
+    = TrackerFailure { fReason :: BS.ByteString }
+    | TrackerResponse
         { rInterval :: Integer
         , rPeers :: [Peer]
         }
