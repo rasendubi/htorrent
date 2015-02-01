@@ -11,6 +11,8 @@ module Data.Torrent
     , totalLength
     , numPieces
     , pieceHash
+    , pieceSize
+    , pieceOffset
     ) where
 
 import qualified Crypto.Hash.SHA1 as SHA1
@@ -22,6 +24,7 @@ import qualified Data.ByteString.Char8 as C
 import Data.Typeable
 import Text.Printf
 import Data.List (foldl')
+import Data.Word
 
 data Torrent = Torrent
     { tInfoHash :: BS.ByteString
@@ -102,5 +105,14 @@ numPieces t = fromIntegral $ (totalLen + pieceLen - 1) `div` pieceLen
         totalLen = totalLength $ tInfoDict t
         pieceLen = idPieceLength $ tInfoDict t
 
-pieceHash :: Torrent -> Int -> BS.ByteString
-pieceHash torrent idx = BS.take 20 . BS.drop (20 * idx) . idPieces $ tInfoDict torrent
+pieceHash :: Torrent -> Word32 -> BS.ByteString
+pieceHash torrent idx = BS.take 20 . BS.drop (20 * fromIntegral idx) . idPieces $ tInfoDict torrent
+
+pieceSize :: Torrent -> Word32 -> Integer
+pieceSize torrent idx = min regularSize (totalLen - regularSize * fromIntegral idx)
+    where
+        regularSize = idPieceLength $ tInfoDict torrent
+        totalLen = totalLength $ tInfoDict torrent
+
+pieceOffset :: Torrent -> Word32 -> Integer
+pieceOffset torrent idx = fromIntegral idx * idPieceLength (tInfoDict torrent)

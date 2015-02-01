@@ -11,6 +11,8 @@ module Network.BitTorrent.Client
 
 import Prelude hiding (zipWith, or)
 
+import Data.Bits ((.&.))
+
 import Control.Applicative ((<$>), (<*>), pure)
 import Control.Concurrent (forkIO)
 import Control.Concurrent.STM
@@ -18,12 +20,12 @@ import Control.Monad
 import Control.Monad.ST (runST)
 
 import Data.Array.BitArray
-import Data.Array.BitArray.ByteString (fromByteString)
 import Data.Array.BitArray.ST (thaw, unsafeFreeze, writeArray)
-import Data.Binary (Word32, decode)
+import Data.Binary (Word8, Word32, decode)
 import Data.List (nub, (\\))
 import Data.Maybe (listToMaybe)
 import qualified Data.STM.LinkedList as List
+import qualified Data.ByteString as BW
 import qualified Data.ByteString.Char8 as BS
 import qualified Data.ByteString.Lazy.Char8 as BL
 
@@ -94,8 +96,24 @@ createClient peerId = Client peerId <$> newTVarIO 0
 bitArrayForTorrent :: Torrent -> BitArray Word32
 bitArrayForTorrent t = array (0, numPieces t - 1) []
 
+-- | Creates BitArray from given ByteString to represent available pieces.
+--
+--   Note that bit order should be reversed.
 bitArrayFromString :: Torrent -> BS.ByteString -> BitArray Word32
-bitArrayFromString t str = fromByteString (0, numPieces t - 1) str
+bitArrayFromString t str = listArray (0, numPieces t - 1) $
+        concatMap (reverse . bits) $ BW.unpack str
+    where
+        bits :: Word8 -> [Bool]
+        bits w =
+            [ w .&. 0x1 /= 0
+            , w .&. 0x2 /= 0
+            , w .&. 0x4 /= 0
+            , w .&. 0x8 /= 0
+            , w .&. 0x10 /= 0
+            , w .&. 0x20 /= 0
+            , w .&. 0x40 /= 0
+            , w .&. 0x80 /= 0
+            ]
 
 newPeerState :: Download -> Peer -> Socket -> IO PeerState
 newPeerState download peer socket =

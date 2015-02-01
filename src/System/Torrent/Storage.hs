@@ -15,9 +15,12 @@ import Prelude hiding (zipWith, or)
 import Control.Applicative ((<$>),(<*>))
 import Control.Concurrent (forkIO)
 import Control.Concurrent.STM
+import Control.Exception
+import Control.Monad
 
 import qualified Crypto.Hash.SHA1 as SHA1
 
+import Data.Maybe
 import Data.Array.BitArray
 import qualified Data.ByteString.Char8 as BS
 import Data.Word
@@ -26,6 +29,8 @@ import System.Directory (createDirectoryIfMissing)
 import System.IO (withBinaryFile, hSeek, IOMode(..), SeekMode(..))
 
 import Data.Torrent
+
+import System.Log.Logger
 
 data Storage = Storage
     { sTorrent :: Torrent
@@ -39,14 +44,13 @@ type PiecesPresentArray = BitArray Word32
 createStorage :: Torrent -> FilePath -> IO Storage
 createStorage torrent path = do
     storage <- Storage torrent path <$> newTVarIO (bitArrayForTorrent torrent) <*> newTChanIO
-    forkIO $ writer storage
+    checkStorage storage
+    forkIO $ do
+        writer storage
     return storage
 
 fromTorrent :: Torrent -> IO Storage
 fromTorrent torrent = createStorage torrent (BS.unpack . idName . tInfoDict $ torrent)
-
-writeBlock :: Storage -> Word32 -> BS.ByteString -> IO ()
-writeBlock = undefined
 
 bitArrayForTorrent :: Torrent -> BitArray Word32
 bitArrayForTorrent t = array (0, numPieces t - 1) []
@@ -56,6 +60,43 @@ writePiece Storage{..} idx piece = do
     writeTChan sWriterChan (idx, piece)
     modifyTVar' sPiecesPresent (// [(idx, True)])
 
+checkStorage :: Storage -> IO ()
+checkStorage s@Storage{..} = do
+    lst <- forM [0..numPieces sTorrent - 1] $ \idx -> do
+        state <- checkPiece s idx
+        infoM "HTorrent.Storage" $ "Checked piece " ++ show idx ++ ": " ++ show state
+        return (idx, state)
+    atomically $ writeTVar sPiecesPresent $ array (0, numPieces sTorrent - 1) lst
+
+checkPiece :: Storage -> Word32 -> IO Bool
+checkPiece = (fmap isJust .) . readPiece
+
+readPiece :: Storage -> Word32 -> IO (Maybe BS.ByteString)
+readPiece s@Storage{..} idx = do
+    let size = pieceSize sTorrent idx
+    let offset = pieceOffset sTorrent idx
+    let expectedPieceHash = pieceHash sTorrent idx
+    fmap BS.concat . mfilter (checkHash expectedPieceHash) . sequence <$> readBlock s offset size
+
+checkHash :: BS.ByteString -> [BS.ByteString] -> Bool
+checkHash expected lst = expected == actual
+    where actual = SHA1.finalize $ SHA1.updates SHA1.init lst
+
+readBlock :: Storage -> Integer -> Integer -> IO [Maybe BS.ByteString]
+readBlock s@Storage{..} pos len
+    | len <= 0  = return $ []
+    | otherwise = do
+        let (fileChain, offset, maxLen) = offsetToFile sTorrent pos
+        let filePath = toFilePath sPath fileChain
+        let realLen = min len maxLen
+        mBlock <- fmap toMaybe $ try $ withBinaryFile filePath ReadMode $ \h -> do
+            hSeek h AbsoluteSeek offset
+            BS.hGet h (fromIntegral realLen)
+        (mBlock :) <$> readBlock s (pos + realLen) (len - realLen)
+
+toMaybe :: Either IOException b -> Maybe b
+toMaybe = either (const Nothing) Just
+
 writer :: Storage -> IO ()
 writer storage@Storage{ sWriterChan = channel } = do
     (idx, block) <- atomically $ readTChan channel
@@ -64,12 +105,12 @@ writer storage@Storage{ sWriterChan = channel } = do
 
 writePiece' :: Storage -> Word32 -> BS.ByteString -> IO ()
 writePiece' s@Storage{..} idx piece = do
-    putStrLn $ "Writing to index: " ++ show idx
-    let pieceSize = idPieceLength $ tInfoDict sTorrent
+    infoM "HTorrent.Storage" $ "Writing to index: " ++ show idx
+    let offset = pieceOffset sTorrent idx
     let realPieceHash = SHA1.hash piece
     let expectedPieceHash = pieceHash sTorrent (fromIntegral idx)
     if realPieceHash == expectedPieceHash
-        then writeBlockToStorage s piece (fromIntegral idx * pieceSize)
+        then writeBlockToStorage s piece offset
         else atomically $ modifyTVar' sPiecesPresent (// [(idx, False)])
 
 writeBlockToStorage :: Storage -> BS.ByteString -> Integer -> IO ()
@@ -77,9 +118,8 @@ writeBlockToStorage s@Storage{..} piece pos
     | BS.null piece = return ()
     | otherwise     = do
         let (fileChain, offset, maxLen) = offsetToFile sTorrent pos
-        let pathChain = BS.pack sPath : fileChain
-        let filePath = BS.unpack . BS.intercalate "/" $ pathChain
-        let dirPath = BS.unpack . BS.intercalate "/" $ init pathChain
+        let filePath = toFilePath sPath fileChain
+        let dirPath = toDirPath sPath fileChain
         createDirectoryIfMissing True dirPath
         let (this,next) = BS.splitAt (fromIntegral maxLen) piece
         withBinaryFile filePath ReadWriteMode $ \h -> do
@@ -87,10 +127,16 @@ writeBlockToStorage s@Storage{..} piece pos
             BS.hPut h this
         writeBlockToStorage s next (pos + maxLen)
 
+toFilePath :: FilePath -> [BS.ByteString] -> FilePath
+toFilePath prefix pathChain = BS.unpack . BS.intercalate "/" $ BS.pack prefix : pathChain
+
+toDirPath :: FilePath -> [BS.ByteString] -> FilePath
+toDirPath prefix pathChain = BS.unpack . BS.intercalate "/" . init $ BS.pack prefix : pathChain
+
 offsetToFile :: Torrent -> Integer -> ([BS.ByteString], Integer, Integer)
 offsetToFile torrent offset =
         case rest of
-            []          -> ([], offset, totalLength $ tInfoDict torrent)
+            []          -> ([], offset, (totalLength $ tInfoDict torrent) - offset)
             ((fo,fi):_) -> (fiPath fi, offset - fo, fiLength fi - (offset - fo))
     where
         rest = dropWhile ((> offset) . fst) $ reverse $ filesWithOffsets torrent
