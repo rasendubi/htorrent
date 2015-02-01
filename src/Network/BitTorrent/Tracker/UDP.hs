@@ -191,7 +191,8 @@ sendRequest request = do
 receiveResponse :: TrackerMonad UdpTrackerResponse
 receiveResponse = do
     sock <- S.gets tsSock
-    liftIO $ decode . BL.fromStrict <$> recv sock 1024
+    -- 1220 is enough for 200 peers in AnnounceResponse
+    liftIO $ decode . BL.fromStrict <$> recv sock 1220
 
 getConnectionId :: TrackerMonad Word64
 getConnectionId = S.gets tsConnectionId
@@ -248,7 +249,7 @@ sendAnnounce (PeerId peerId) torrent =
                 , aqEvent = None
                 , aqIpAddress = 0
                 , aqKey = 0
-                , aqNumWant = -1
+                , aqNumWant = 200
                 , aqPort = 0
                 }
     where infoHash = tInfoHash torrent

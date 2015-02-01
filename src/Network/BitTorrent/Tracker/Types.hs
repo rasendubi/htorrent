@@ -29,7 +29,7 @@ newtype PeerId = PeerId { fromPeerId :: BS.ByteString }
     deriving (Read, Show, Eq, Typeable)
 
 instance Binary Peer where
-    get = Peer Nothing <$> fmap showIp getWord32be <*> getWord16be
+    get = Peer Nothing <$> fmap showIp (label "ip" getWord32be) <*> label "port" getWord16be
 
     put = undefined
 

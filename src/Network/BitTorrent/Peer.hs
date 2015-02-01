@@ -147,7 +147,7 @@ toMessages str
     | otherwise   = msg : toMessages rest
     where
         (msg,rest) = case runGetOrFail get str of
-            Left (s,_,err)  -> (Left err, s)
+            Left (_,_,err)  -> (Left err, BL.empty)
             Right (s,_,res) -> (Right res, s)
 
 socketToMessages :: Socket -> IO [Either String Message]
