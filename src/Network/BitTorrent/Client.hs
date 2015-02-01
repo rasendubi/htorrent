@@ -4,9 +4,11 @@ module Network.BitTorrent.Client
     , TrackerState(..)
     , PeerState
     , PeerStateSnapshot(..)
+    , PiecesPresentArray
     , peerStateToSnapshot
     , createClient
     , startDownload
+    , getPresentArray
     ) where
 
 import Prelude hiding (zipWith, or)
@@ -92,6 +94,9 @@ peerStateToSnapshot ps =
 
 createClient :: BS.ByteString -> IO Client
 createClient peerId = Client peerId <$> newTVarIO 0
+
+getPresentArray :: Download -> STM PiecesPresentArray
+getPresentArray = getPiecesPresent . dStorage
 
 bitArrayForTorrent :: Torrent -> BitArray Word32
 bitArrayForTorrent t = array (0, numPieces t - 1) []

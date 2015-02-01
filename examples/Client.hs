@@ -16,9 +16,17 @@ import Control.Monad.Trans
 
 import System.Log.Logger
 
+import System.Console.ANSI
+
+import Data.Function (on)
+import qualified Data.Array.BitArray as A
+import Data.Ix
+
 main :: IO ()
 main = do
-    updateGlobalLogger rootLoggerName (setLevel DEBUG)
+    -- updateGlobalLogger rootLoggerName (setLevel DEBUG)
+    hideCursor
+    clearScreen
     args <- getArgs
     client <- createClient "HASKELL7TORRENT5YEAH"
     case args of
@@ -26,28 +34,48 @@ main = do
         _ -> return ()
     forM_ args $ \file -> runEitherT $ do
         torrent <- hoistEither =<< lift (T.fromFile file)
-        lift $ startDownload client torrent (BS.unpack . idName . tInfoDict $ torrent)
-        lift $ trackChanges onActivePeersChanged $ activePeers client
+        download <- lift $ startDownload client torrent (BS.unpack . idName . tInfoDict $ torrent)
+        uiLock <- liftIO $ newMVar ()
+        liftIO $ forkIO $ trackTVarChanges (activePeers client) $ onActivePeersChanged uiLock
+        liftIO $ forkIO $ trackChanges (getPresentArray download) $ updatePresentArray uiLock
     forever yield
+
+instance (Ix i) => Eq (A.BitArray i) where
+    (==) = (==) `on` A.assocs
 
 showUsage :: IO ()
 showUsage = getProgName >>= \name -> putStrLn $ "Usage: " ++ name ++ " <torrent>"
 
-onActivePeersChanged :: Int -> IO ()
-onActivePeersChanged n = putStr "Active peers: " >> print n
+updatePresentArray :: MVar () -> PiecesPresentArray -> IO ()
+updatePresentArray lock a = do
+    withMVar lock $ \_ -> do
+        setCursorPosition 1 0
+        putStrLn $ map (\x -> if x then '1' else '_') $ A.elems a
+        clearFromCursorToScreenEnd
 
-trackChanges :: (Eq a) => (a -> IO b) -> TVar a -> IO ()
-trackChanges action var = do
-    initial <- readTVarIO var
+onActivePeersChanged :: MVar () -> Int -> IO ()
+onActivePeersChanged lock n = do
+    withMVar lock $ \_ -> do
+        setCursorPosition 0 0
+        clearLine
+        putStr "Active peers: " >> print n
+        setCursorPosition 100 0
+
+trackTVarChanges :: (Eq a) => TVar a -> (a -> IO b) -> IO ()
+trackTVarChanges var = trackChanges $ readTVar var
+
+trackChanges :: (Eq a) => STM a -> (a -> IO b) -> IO ()
+trackChanges getValue action = do
+    initial <- atomically $ getValue
     action initial
-    trackFurther action var initial
+    trackFurther initial getValue action
 
-trackFurther :: (Eq a) => (a -> IO b) -> TVar a -> a -> IO ()
-trackFurther action var prev = do
+trackFurther :: (Eq a) => a -> STM a -> (a -> IO b) -> IO ()
+trackFurther prev getValue action = do
     value <- atomically $ do
-        val <- readTVar var
+        val <- getValue
         if val == prev
             then retry
             else return val
     action value
-    trackFurther action var value
+    trackFurther prev getValue action

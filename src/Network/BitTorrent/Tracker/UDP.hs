@@ -185,7 +185,6 @@ nextTransaction = do
 sendRequest :: UdpTrackerRequest -> TrackerMonad ()
 sendRequest request = do
     sock <- S.gets tsSock
-    liftIO $ print request
     void $ liftIO $ send sock $ BL.toStrict $ encode request
 
 receiveResponse :: TrackerMonad UdpTrackerResponse

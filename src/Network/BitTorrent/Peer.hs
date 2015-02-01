@@ -33,6 +33,8 @@ import Data.Binary.Put
 import Control.Monad
 import Control.Applicative
 
+import System.Log.Logger
+
 data Handshake = Handshake
                 { hExtensionBits :: Word64
                 , hInfoHash :: ByteString
@@ -134,7 +136,7 @@ connectToPeer peer = do
     addrInfo <- getAddrInfo Nothing (Just . BS.unpack $ pIp peer) (Just . show $ pPort peer)
     let addr = head addrInfo
     sock <- socket (addrFamily addr) Stream defaultProtocol
-    putStrLn $ "Connecting " ++ show sock ++ "(" ++ show (addrAddress addr) ++ ")"
+    infoM "HTorrent.Peer" $ "Connecting " ++ show sock ++ "(" ++ show (addrAddress addr) ++ ")"
     res <- try (connect sock (addrAddress addr)) :: IO (Either IOException ())
     return $ either (Left . show) (Right . const sock) res
 

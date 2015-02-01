@@ -8,6 +8,7 @@ module System.Torrent.Storage
     , writePiece
     , getUnfinishedPieces
     , containsNeededPieces
+    , getPiecesPresent
     ) where
 
 import Prelude hiding (zipWith, or)
@@ -159,3 +160,6 @@ containsNeededPieces :: Storage -> PiecesPresentArray -> STM Bool
 containsNeededPieces storage peerPieces = do
     ourPieces <- readTVar $ sPiecesPresent storage
     return $ or $ zipWith (\x y -> y && not x) ourPieces peerPieces
+
+getPiecesPresent :: Storage -> STM PiecesPresentArray
+getPiecesPresent = readTVar . sPiecesPresent
